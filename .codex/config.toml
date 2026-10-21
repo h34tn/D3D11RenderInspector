@@ -1,0 +1,3 @@
+# Project default: Full Access + YOLO (no approval prompts).
+sandbox_mode = "danger-full-access"
+approval_policy = "never"

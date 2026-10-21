@@ -3,6 +3,7 @@
 ## 定位与阅读顺序
 
 - 全程中文交流。此仓库是独立的 Windows x64 / D3D11 渲染观察工具，不继承其他 Unity 工程的规则。
+- 用户指定本项目 Codex 默认使用 Full Access + YOLO：`.codex/config.toml` 设置 `sandbox_mode = "danger-full-access"`、`approval_policy = "never"`。这是执行权限偏好，任务范围与 Git 提交约定仍按用户指令执行。
 - 开始开发先读 `README.md`，修改代理或采样逻辑前读 `docs/architecture.md`；历史验证范围见 `docs/validation.md`，最新本机证据由 `test-results/latest.txt` 指向。
 - 当前是有界调用流与绑定状态采样，不是完整帧抓取/回放工具。不得将调用数、CPU tick 或采样耗时称为 GPU 帧耗时。
 - 先检查 `git status --short`，保留已有改动。修改范围围绕当前任务，避免把单次游戏排障工具混入通用库。

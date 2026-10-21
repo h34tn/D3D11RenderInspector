@@ -137,4 +137,6 @@ test-results/         本机验证证据，不入版本控制
 codex -C D:\Projects\D3D11RenderInspector
 ```
 
-也可以在 Codex 应用中选择此目录作为项目。采用官方的 [AGENTS.md 项目指引机制](https://learn.chatgpt.com/docs/agent-configuration/agents-md)，无需另建账号、API Key 或覆盖全局模型/权限设置。新会话可先要求“读取 AGENTS.md 和 README，概述当前实现与验证范围”。
+也可以在 Codex 应用中选择此目录作为项目。采用官方的 [AGENTS.md 项目指引机制](https://learn.chatgpt.com/docs/agent-configuration/agents-md)，无需另建账号或 API Key。新会话可先要求“读取 AGENTS.md 和 README，概述当前实现与验证范围”。
+
+按项目所有者要求，`.codex/config.toml` 默认启用 **Full Access + YOLO**：`sandbox_mode = "danger-full-access"`，`approval_policy = "never"`。配置仅作用于此项目，模型沿用个人设置。项目本地配置需要将该目录标为 trusted；本机已配置该目录的信任项，其他机器首次打开时需信任项目。新建会话加载配置，显式启动参数或管理策略可能覆盖项目默认值。
