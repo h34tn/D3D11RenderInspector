@@ -1,0 +1,12 @@
+{
+  "source_directory": "D:\\Handoff\\BloomInspection\\d3d11_proxy",
+  "source_files": {
+    "proxy.cpp": "eca0174c79030e71568bb0e48e7cc65de773be0b4dcb489fe4d2817339caf747",
+    "observer.cpp": "19705fba84458b1453f267ca29c508aa64853fd8cfd450e95b734448e0f61ed8",
+    "observer_smoke.cpp": "6707b57c6fa6ab95faa335611d85dc9465342960964bcd803ac0400178dc9c65",
+    "abi_test.cpp": "45341f0464bcac8ac7172e10f801aa38e19c1a9819374f94c45fca1893fe6131",
+    "generate_exports.py": "b8b748b45c3ee46a35078ee239e1ef335b86d27c81371eaaa7d26c898938926d"
+  },
+  "migration": "Standalone project. Source adapted for configurable per-process sessions, three modes, portable build and tools. No game binaries or live captures copied.",
+  "original_directory_modified": false
+}

@@ -1,0 +1,21 @@
+/build/
+/captures/
+/test-results/
+__pycache__/
+*.pyc
+.vs/
+
+# Native build intermediates and local diagnostics.
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.dmp
+
+# Local credentials and machine-specific overrides.
+.env
+.env.*
+!.env.example
+/.codex/auth.json
+/.codex-log/
