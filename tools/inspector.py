@@ -17,6 +17,77 @@ from generate_exports import pe_exports
 PROJECT = Path(__file__).resolve().parents[1]
 
 
+class MissingProxyError(ValueError):
+    """A valid managed installation has lost its proxy DLL."""
+
+
+def read_install_manifest(directory):
+    manifest = directory / '.d3d11-inspector-install.json'
+    try:
+        raw = manifest.read_bytes()
+        info = json.loads(raw.decode('utf8'))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f'安装清单无法解析：{manifest}') from error
+    if not isinstance(info, dict) or type(info.get('version')) is not int or info['version'] != 1:
+        raise ValueError(f'不支持的安装清单格式：{manifest}')
+    name, digest = info.get('filename'), info.get('sha256')
+    if (not isinstance(name, str) or name != Path(name).name or
+            any(c in name for c in '/\\:') or not name.lower().endswith('.dll')):
+        raise ValueError(f'安装清单中的 DLL 文件名无效：{manifest}')
+    if (not isinstance(digest, str) or len(digest) != 64 or
+            any(c not in '0123456789abcdef' for c in digest) or not isinstance(info.get('source'), str)):
+        raise ValueError(f'安装清单缺少有效的哈希或来源：{manifest}')
+    return info, raw
+
+
+def repair(directory, binary):
+    """Restore a missing managed DLL; preserve the old manifest and never replace a DLL."""
+    directory = directory.resolve(strict=True)
+    system = Path(os.environ['SystemRoot']).resolve()
+    if directory == system or system in directory.parents:
+        raise ValueError('Do not deploy into Windows directories')
+    manifest = directory / '.d3d11-inspector-install.json'
+    info, original = read_install_manifest(directory)
+    target = directory / info['filename']
+    if os.path.lexists(target):
+        raise ValueError(f'目标 DLL 已存在，拒绝覆盖或替换：{target}')
+    # Snapshot the source before validation so a concurrent build cannot change
+    # the bytes between export verification, copying, and manifest hashing.
+    payload = binary.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    fd, temporary = tempfile.mkstemp(prefix='inspector-repair-', suffix='.tmp', dir=directory)
+    created = False
+    try:
+        with os.fdopen(fd, 'wb') as out:
+            out.write(payload)
+        if pe_exports(Path(temporary)) != pe_exports(system / 'System32/d3d11.dll'):
+            raise ValueError('Build exports do not match this Windows runtime; rebuild locally')
+        fd, backup = tempfile.mkstemp(prefix=manifest.name + '.backup-', dir=directory)
+        with os.fdopen(fd, 'wb') as out:
+            out.write(original)
+        if manifest.read_bytes() != original:
+            raise ValueError('安装清单在修复期间发生变化，已停止；不会覆盖其他修改。')
+        with target.open('xb') as out:
+            created = True
+            out.write(payload)
+        write_json(temporary, dict(version=1, filename=info['filename'], sha256=digest,
+                                   source=str(binary.resolve())))
+        if manifest.read_bytes() != original or sha256(target) != digest:
+            raise ValueError('安装文件在修复期间发生变化，已停止。')
+        os.replace(temporary, manifest)
+    except Exception:
+        # Only undo our new copy, never an existing or subsequently modified DLL.
+        if created and target.is_file() and sha256(target) == digest:
+            target.unlink()
+        raise
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print(f'Restored missing proxy: {target}')
+    print(f'Previous manifest preserved: {backup}')
+    return Path(backup)
+
+
 def default_output():
     return Path(os.environ.get('D3D11_PROXY_OUTPUT') or
                 str(Path(os.environ.get('LOCALAPPDATA', tempfile.gettempdir())) / 'D3D11RenderInspector/captures'))
@@ -168,6 +239,15 @@ def uninstall(directory):
     print(f'Removed verified proxy: {target}')
 
 
+def launch(executable, output, mode, arguments, detach_output=False):
+    executable = executable.resolve(strict=True)
+    pe_exports(executable)  # Also verifies x64; exports are not required for an EXE.
+    env = dict(os.environ, D3D11_PROXY_OUTPUT=str(output.resolve()), D3D11_PROXY_MODE=mode)
+    streams = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL) if detach_output else {}
+    return subprocess.Popen([str(executable), *arguments], cwd=executable.parent, env=env, **streams)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -185,6 +265,9 @@ def main():
     deploy.add_argument('--name', default='d3d11.dll')
     remove = commands.add_parser('uninstall', help='Remove only the installed hash-matching DLL')
     remove.add_argument('directory', type=Path)
+    restore = commands.add_parser('repair', help='Restore a missing managed DLL, preserving the old manifest')
+    restore.add_argument('directory', type=Path)
+    restore.add_argument('--binary', type=Path, default=PROJECT/'build/d3d11.dll')
     run = commands.add_parser('run', help='Launch target with per-process inspector environment')
     run.add_argument('--exe', type=Path, required=True)
     run.add_argument('--output', type=Path, default=default_output())
@@ -199,12 +282,10 @@ def main():
     elif args.command == 'disassemble': disassemble(args.session.resolve(strict=True))
     elif args.command == 'install': install(args.directory, args.binary, args.name)
     elif args.command == 'uninstall': uninstall(args.directory)
+    elif args.command == 'repair': repair(args.directory, args.binary)
     elif args.command == 'run':
-        executable = args.exe.resolve(strict=True)
-        pe_exports(executable)  # Also verifies x64; exports are not required for an EXE.
-        env = dict(os.environ, D3D11_PROXY_OUTPUT=str(args.output.resolve()), D3D11_PROXY_MODE=args.mode)
         arguments = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
-        process = subprocess.Popen([str(executable), *arguments], cwd=executable.parent, env=env)
+        process = launch(args.exe, args.output, args.mode, arguments)
         print(f'Launched PID {process.pid}. DLL loading is target-dependent; check sessions and proxy.log.')
 
 

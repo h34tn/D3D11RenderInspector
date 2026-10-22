@@ -6,6 +6,31 @@ Windows x64 / Direct3D 11 渲染调用观察代理。从内部测试包分析时
 
 ## 快速开始
 
+### 图形界面（推荐）
+
+双击根目录的 **`start_gui.cmd`**（或已关联 Python 的 `inspector.pyw`）即可打开中文窗口，无需输入命令。也可运行 `python tools/inspector_gui.py`。界面使用 Python 自带的 Tkinter，无需安装第三方包；Python 安装时需勾选 Tcl/Tk。
+
+1. 选择游戏实际渲染进程的 **EXE** 和采样输出目录。尚无 `build/d3d11.dll` 时先点“构建代理”，需要下述 C++ 工具链。
+2. 退出游戏，点击“**部署并启动**”。默认调用观察模式；首次接入可先选“纯转发”验证兼容性，退出游戏后改回“调用观察”再次启动。游戏须使用 DX11；Unity 可点“Unity DX11”添加参数。
+3. 会话列表自动刷新，显示运行状态、观察器状态和采样文件数。只有唯一一个运行中会话与所选 EXE 路径匹配时才自动选择；多个实例或启动器子进程须手动选择。PID 与进程创建时间一起核对，历史会话不会被误当作存活进程。
+4. 进入目标场景后点“**采样并打开报告**”，默认倒计时 5 秒，切回游戏并保持渲染。默认记录 2000 个调用事件；完整结束后自动分析并打开浏览器报告，最多等待 120 秒。超时保留请求和数据，不会伪报成功；之后可用“分析已有采样”查看结果。
+5. “分析已有采样”“反汇编 Shader”“代理日志”“会话文件夹”可直接查看输出。“打开历史会话”选择 `pid_…` 目录即可分析已有数据，无需运行游戏。
+6. 用完退出游戏，再点“卸载代理”。关闭 GUI 不退出游戏、不卸载代理。任务执行期间先等待完成再关闭窗口。
+
+部署复用必须同时通过安装清单、已安装 DLL 和当前构建 DLL 的哈希校验；遇到已有第三方 DLL、被修改的代理或旧版本会停止并提示，不覆盖文件。界面只记住 EXE 和输出路径，设置存于 `%LOCALAPPDATA%\D3D11RenderInspector\gui.json`；不保存启动参数。
+
+如果安装清单有效、但清单指定的代理 DLL 缺失，“部署并启动”会先备份旧清单为 `.d3d11-inspector-install.json.backup-*`，再用当前本机构建补齐 DLL 并更新清单。已有 DLL（包括被修改的 DLL）不会被覆盖；清单损坏会明确报错。若 DLL 再次消失，请检查文件移除原因，工具不会循环补写。也可在退出游戏后手动修复：
+
+```powershell
+python tools/inspector.py repair "D:\Games\YourTestGame"
+```
+
+游戏启动返回 **WinError 740（需要提升权限）** 时，GUI 会提供“以管理员权限重启并重试”。确认 Windows UAC 后，管理员窗口会保留游戏、输出目录、模式、启动参数及采样设置，并重试启动；启动参数只通过此次进程命令行传递，不写入设置文件。取消 UAC 会保留原窗口。提权的是工具本身，由工具重新设置游戏的采样环境；不会修改系统环境变量，也不会重复覆盖已安装的代理。更新工具后须关闭旧窗口、重新打开 `start_gui.cmd` 才能加载此逻辑。
+
+此版本提供可双击启动的桌面界面，仍依赖本机 Python/Tk，并非脱离 Python 的单文件 EXE。构建通过不等于目标游戏验证通过；完整采样也不是完整帧抓取或 GPU 耗时测量。
+
+### 命令行
+
 前置条件：Windows x64、Python 3.10+ x64、Visual Studio 2022 或 Build Tools（安装“使用 C++ 的桌面开发”、MSVC x64 工具和 Windows SDK）。Python 工具仅使用标准库，无需 pip 安装。无需 CMake。
 
 在项目目录的 PowerShell 中：
@@ -30,7 +55,7 @@ python tools/inspector.py run --exe "D:\Games\YourTestGame\Game.exe" --output "D
 
 `-force-d3d11` 是 Unity 示例参数，其他引擎按自身启动方式填写，或省略 `--` 及其后参数。先以 `forward` 验证转发能启动；退出程序后改用 `--mode observe` 启动，正常进入目标场景。
 
-部署只复制代理并创建 `.d3d11-inspector-install.json`；已有同名 DLL 时直接拒绝，不覆盖，不修改 EXE / UnityPlayer / 驱动。**本次整理没有部署到任何实际游戏目录。**
+部署只复制代理并创建 `.d3d11-inspector-install.json`；已有同名 DLL 时直接拒绝，不覆盖，不修改 EXE / UnityPlayer / 驱动。部署和文件修复不代表目标游戏启动或采样验证通过，当前证据范围见 [验证记录](docs/validation.md)。
 
 ### 代理是否真的加载
 
@@ -48,6 +73,8 @@ python tools/inspector.py sessions --output "D:\Captures\MyGame"
 没有会话/日志不代表没有渲染，可能是程序没有加载此 DLL、采用 D3D12/Vulkan、加载 DLL 后尚未调用导出，或输出目录不可写。部分程序显式加载 System32 的 D3D11，本地同名代理不会自动接管。
 
 旧内部测试包采用过专门的加载名调整；这里没有打包该游戏二进制或通用二进制修补器。对显式加载系统 DLL 的程序，优先在自有测试程序/引擎加载入口指定代理 DLL。`install --name custom.dll` 仅支持使用已配置好的其他加载名，本身不会改变程序的加载行为。当前也不提供附加到已运行进程的功能。
+
+GUI 会自动遵循有效安装清单中的自定义 DLL 名称，包括复用、缺失修复和卸载；首次 GUI 安装仍使用 `d3d11.dll`。已有旧代理不能直接覆盖，应退出目标程序，明确备份和恢复方式后再迁移。启动后若检测到本次 PID 的旧版 `D3D11Proxy_<PID>.log`，界面会明确提示旧代理不使用当前会话目录，不再只显示等待会话；旧版固定输出目录和共享采样请求不会自动导入或触发。
 
 ## 触发一次短采样
 
@@ -120,6 +147,10 @@ python tools/inspector.py uninstall "D:\Games\YourTestGame"
 ```text
 src/                  真实 D3D11 转发、观察器、输出配置
 tools/                导出生成、部署/卸载、启动、采样与分析 CLI
+tools/inspector_gui.py 中文 Tkinter 桌面界面
+tools/gui_support.py   会话身份检查、部署复用和采样完成等待
+inspector.pyw          无控制台 GUI 入口
+start_gui.cmd          双击启动 GUI
 tests/                ABI、真实绘制/计算/读回、记录完整性、工具测试
 docs/                 架构与验证范围
 build.cmd             自动发现 VS C++ 工具链并从源码构建
