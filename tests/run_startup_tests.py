@@ -54,6 +54,12 @@ def main():
                 assert complete and not errors and len(events) == 1
                 assert events[0]['call'] == ('Dispatch' if name == 'compute' else 'Draw')
                 assert events[0]['outputs'][0]['resource']['width'] == 4
+                if name == 'compute':
+                    assert events[0]['args'] == {'x': 1, 'y': 1, 'z': 1}, events[0]['args']
+                else:
+                    assert events[0]['args'] == {'vertex_count': 3, 'start_vertex': 0}, events[0]['args']
+                    assert events[0]['depth_state']['depth_func'] == 4, events[0]['depth_state']
+                    assert events[0]['depth_target']['resource']['width'] == 4
                 assert (session / events[0]['shader_file']).is_file()
             if count:
                 analyze(session)

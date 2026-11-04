@@ -81,3 +81,11 @@ GUI 现已遵循安装清单中的自定义 DLL 名称，并能识别本次启�
 该短采样主要使用 `miHoYo/Scene/Login Base`，确认的是登录场景接入与调用采样，不代表已经采集可游玩地形、完整帧或 GPU 耗时。没有修改磁盘上的游戏 EXE；调试器临时入口断点在恢复入口前还原，观察器钩子固定到进程退出，不支持运行中卸载。此前一次官方 RenderDoc 1.46 标准启动对照在设备创建阶段退出，不能将其启动返回的控制 ID 当作捕获成功。
 
 用户随后确认已进入游戏，采集 `capture_2.jsonl`：2000 事件，完整结束记录、连续编号、无解析错误；1121 份 Shader 成功反汇编。其中实际调用 CTS Terrain、BlendStone 和 Terrain Base Map；代表事件 30 的两张 1280×720 输出与事件 109 的岩石输入资源对应，PS 反汇编可核对高度竞争及按深度差混合颜色/法线的代码。现场细节和局限见统一分析文档目录中的 [terrain-runtime-findings.txt](../../GenshinImpact/terrain-runtime-findings.txt) 与原始 [terrain-runtime-evidence.json](../test-results/genshin-analysis/terrain-runtime-evidence.json)。这些数据仍不是完整帧、纹理读回、常量读取或 GPU 性能测试。
+
+## 采样格式版本 3：调用参数与深度状态（2026-11-04）
+
+`capture_N.jsonl` 头部版本升到 3：每个事件新增 `args`（Draw 系列的顶点/索引/实例数与起始偏移、Dispatch 线程组数、间接调用的参数缓冲身份与偏移、ExecuteCommandList 的 restore 标志；参数先以原值存在栈上，只在采样进行中才格式化，不采样时不分配字符串），图形调用新增 `depth_target`（DSV 视图格式、只读标志、资源）与 `depth_state`（深度开关、写掩码、比较函数、模板开关与 ref；未绑定状态对象时按 D3D11 默认值记录并标 `default=1`）。间接参数缓冲内容仍不读回。`analyze` 的 TSV/HTML 新增"调用参数"和"深度"两列，旧版本采样这两列为空。
+
+`render_smoke` 改为绑定 4×4 D24S8 DSV 与非默认深度状态（LESS_EQUAL、写入关、ref=5），测试断言记录值与设置一致；计算测试断言线程组参数且无深度字段。`build.cmd`、`build_injected.cmd` 退出码 0，MSVC `/W4` 无警告。`python tests/run_tests.py` 退出码 0，[result.json](../test-results/20261104_141000/result.json) `passed: true`，Python 回归 38 项通过；`python tests/run_startup_tests.py` 退出码 0，`test-results/startup_20261104_141019/result.json` `passed: true`。
+
+代理 DLL SHA-256：`2128d84590f602680e1fd3e42347f8dd659535902d5dac744d936c0300554cdb`；启动观察器 `inspector_hook.dll` SHA-256：`6ef3c4e9c5e07eac91edebc8ed3be231ed3e03a8c0c9f87819d1737d1f672fa6`。以上为独立测试证据，尚未用新版本在目标游戏中采样。

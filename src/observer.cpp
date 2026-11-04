@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <d3d11_4.h>
 #include <memory>
 #include <mutex>
@@ -164,14 +165,77 @@ void StartCapture()
         return;
     setvbuf(trace, nullptr, _IOFBF, 65536);
     fprintf(trace,
-            "{\"type\":\"header\",\"version\":2,\"scope\":\"bounded immediate-context state snapshots, no "
-            "Present/frame boundary; constant buffer contents and texture pixels not captured\",\"pid\":%lu}\n",
+            "{\"type\":\"header\",\"version\":3,\"scope\":\"bounded immediate-context state snapshots, no "
+            "Present/frame boundary; constant buffer contents, texture pixels and indirect argument buffer "
+            "contents not captured\",\"pid\":%lu}\n",
             GetCurrentProcessId());
     eventCount = 0;
     remaining = n;
     ObserverInfo("observer bounded capture started");
 }
-void Record(ID3D11DeviceContext *c, const char *kind, bool compute = false)
+// Raw call parameters, kept on the stack for every call; formatted only while a capture is active.
+// Indirect calls only identify the argument buffer; its contents are not read back.
+struct CallArgs
+{
+    const char *names[5] = {};
+    long long values[5] = {};
+    unsigned count = 0;
+    ID3D11Buffer *indirect = nullptr;
+    UINT offset = 0;
+    CallArgs(std::initializer_list<std::pair<const char *, long long>> list)
+    {
+        for (auto &v : list)
+            if (count < 5)
+            {
+                names[count] = v.first;
+                values[count++] = v.second;
+            }
+    }
+    CallArgs(ID3D11Buffer *buffer, UINT bufferOffset) : indirect(buffer), offset(bufferOffset)
+    {
+    }
+};
+std::string FormatArgs(const CallArgs &a)
+{
+    std::ostringstream s;
+    if (a.indirect)
+    {
+        s << "{\"buffer\":" << Resource(a.indirect) << ",\"offset\":" << a.offset << "}";
+        return s.str();
+    }
+    s << "{";
+    for (unsigned i = 0; i < a.count; i++)
+        s << (i ? "," : "") << "\"" << a.names[i] << "\":" << a.values[i];
+    s << "}";
+    return s.str();
+}
+std::string DepthState(ID3D11DeviceContext *c)
+{
+    ID3D11DepthStencilState *state = nullptr;
+    UINT ref = 0;
+    c->OMGetDepthStencilState(&state, &ref);
+    D3D11_DEPTH_STENCIL_DESC d = {};
+    bool isDefault = state == nullptr;
+    if (state)
+    {
+        state->GetDesc(&d);
+        state->Release();
+    }
+    else
+    {
+        // A null state is the D3D11 default: depth test LESS with writes, stencil off.
+        d.DepthEnable = TRUE;
+        d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        d.DepthFunc = D3D11_COMPARISON_LESS;
+        d.StencilEnable = FALSE;
+    }
+    std::ostringstream s;
+    s << "{\"default\":" << (int)isDefault << ",\"depth_enable\":" << (int)d.DepthEnable
+      << ",\"depth_write\":" << (int)d.DepthWriteMask << ",\"depth_func\":" << (int)d.DepthFunc
+      << ",\"stencil_enable\":" << (int)d.StencilEnable << ",\"stencil_ref\":" << ref << "}";
+    return s.str();
+}
+void Record(ID3D11DeviceContext *c, const char *kind, const CallArgs &args, bool compute = false)
 {
     // Deferred contexts cannot provide reliable Get* binding snapshots.
     if (c->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
@@ -192,7 +256,8 @@ void Record(ID3D11DeviceContext *c, const char *kind, bool compute = false)
         return;
     std::ostringstream s;
     s << "{\"event\":" << ++eventCount << ",\"tick\":" << GetTickCount64() << ",\"thread\":" << GetCurrentThreadId()
-      << ",\"context\":\"" << Ptr(c) << "\",\"context_type\":" << (int)c->GetType() << ",\"call\":\"" << kind << "\"";
+      << ",\"context\":\"" << Ptr(c) << "\",\"context_type\":" << (int)c->GetType() << ",\"call\":\"" << kind << "\""
+      << ",\"args\":" << FormatArgs(args);
     ID3D11DeviceChild *shader = nullptr;
     if (compute)
     {
@@ -239,6 +304,7 @@ void Record(ID3D11DeviceContext *c, const char *kind, bool compute = false)
     s << "]";
     s << ",\"outputs\":[";
     sep = false;
+    ID3D11DepthStencilView *z = nullptr;
     if (compute)
     {
         ID3D11UnorderedAccessView *v[8] = {};
@@ -256,7 +322,6 @@ void Record(ID3D11DeviceContext *c, const char *kind, bool compute = false)
     else
     {
         ID3D11RenderTargetView *v[8] = {};
-        ID3D11DepthStencilView *z = nullptr;
         c->OMGetRenderTargets(8, v, &z);
         for (unsigned i = 0; i < 8; i++)
             if (v[i])
@@ -269,10 +334,23 @@ void Record(ID3D11DeviceContext *c, const char *kind, bool compute = false)
                 s << "{\"slot\":" << i << ",\"view_format\":" << (int)d.Format << ",\"resource\":" << View(v[i]) << "}";
                 v[i]->Release();
             }
-        if (z)
-            z->Release();
     }
     s << "]";
+    if (!compute)
+    {
+        s << ",\"depth_target\":";
+        if (z)
+        {
+            D3D11_DEPTH_STENCIL_VIEW_DESC d;
+            z->GetDesc(&d);
+            s << "{\"view_format\":" << (int)d.Format << ",\"flags\":" << d.Flags << ",\"resource\":" << View(z)
+              << "}";
+            z->Release();
+        }
+        else
+            s << "null";
+        s << ",\"depth_state\":" << DepthState(c);
+    }
     ID3D11Buffer *cb[14] = {};
     if (compute)
         c->CSGetConstantBuffers(0, 14, cb);
@@ -326,52 +404,53 @@ void Record(ID3D11DeviceContext *c, const char *kind, bool compute = false)
 }
 void STDMETHODCALLTYPE DrawIndexed(ID3D11DeviceContext *c, UINT n, UINT start, INT base)
 {
-    Record(c, "DrawIndexed");
+    Record(c, "DrawIndexed", {{"index_count", n}, {"start_index", start}, {"base_vertex", base}});
     Original<decltype(&DrawIndexed)>(c, 12)(c, n, start, base);
 }
 void STDMETHODCALLTYPE Draw(ID3D11DeviceContext *c, UINT n, UINT start)
 {
-    Record(c, "Draw");
+    Record(c, "Draw", {{"vertex_count", n}, {"start_vertex", start}});
     Original<decltype(&Draw)>(c, 13)(c, n, start);
 }
 void STDMETHODCALLTYPE DrawIndexedInstanced(ID3D11DeviceContext *c, UINT a, UINT b, UINT d, INT e, UINT f)
 {
-    Record(c, "DrawIndexedInstanced");
+    Record(c, "DrawIndexedInstanced",
+           {{"index_count", a}, {"instance_count", b}, {"start_index", d}, {"base_vertex", e}, {"start_instance", f}});
     Original<decltype(&DrawIndexedInstanced)>(c, 20)(c, a, b, d, e, f);
 }
 void STDMETHODCALLTYPE DrawInstanced(ID3D11DeviceContext *c, UINT a, UINT b, UINT d, UINT e)
 {
-    Record(c, "DrawInstanced");
+    Record(c, "DrawInstanced", {{"vertex_count", a}, {"instance_count", b}, {"start_vertex", d}, {"start_instance", e}});
     Original<decltype(&DrawInstanced)>(c, 21)(c, a, b, d, e);
 }
 void STDMETHODCALLTYPE DrawAuto(ID3D11DeviceContext *c)
 {
-    Record(c, "DrawAuto");
+    Record(c, "DrawAuto", CallArgs{});
     Original<decltype(&DrawAuto)>(c, 38)(c);
 }
 void STDMETHODCALLTYPE DrawIndexedIndirect(ID3D11DeviceContext *c, ID3D11Buffer *b, UINT off)
 {
-    Record(c, "DrawIndexedInstancedIndirect");
+    Record(c, "DrawIndexedInstancedIndirect", CallArgs(b, off));
     Original<decltype(&DrawIndexedIndirect)>(c, 39)(c, b, off);
 }
 void STDMETHODCALLTYPE DrawIndirect(ID3D11DeviceContext *c, ID3D11Buffer *b, UINT off)
 {
-    Record(c, "DrawInstancedIndirect");
+    Record(c, "DrawInstancedIndirect", CallArgs(b, off));
     Original<decltype(&DrawIndirect)>(c, 40)(c, b, off);
 }
 void STDMETHODCALLTYPE Dispatch(ID3D11DeviceContext *c, UINT x, UINT y, UINT z)
 {
-    Record(c, "Dispatch", true);
+    Record(c, "Dispatch", {{"x", x}, {"y", y}, {"z", z}}, true);
     Original<decltype(&Dispatch)>(c, 41)(c, x, y, z);
 }
 void STDMETHODCALLTYPE DispatchIndirect(ID3D11DeviceContext *c, ID3D11Buffer *b, UINT off)
 {
-    Record(c, "DispatchIndirect", true);
+    Record(c, "DispatchIndirect", CallArgs(b, off), true);
     Original<decltype(&DispatchIndirect)>(c, 42)(c, b, off);
 }
 void STDMETHODCALLTYPE Execute(ID3D11DeviceContext *c, ID3D11CommandList *l, BOOL restore)
 {
-    Record(c, "ExecuteCommandList_CONTENTS_NOT_EXPANDED");
+    Record(c, "ExecuteCommandList_CONTENTS_NOT_EXPANDED", {{"restore_state", restore}});
     Original<decltype(&Execute)>(c, 58)(c, l, restore);
 }
 HRESULT STDMETHODCALLTYPE CreatePS(ID3D11Device *d, const void *b, SIZE_T n, ID3D11ClassLinkage *l,

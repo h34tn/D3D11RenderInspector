@@ -6,10 +6,25 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'tools'))
-from inspector import capture, install, read_capture, repair, sha256, uninstall
+from inspector import call_args, capture, depth, install, read_capture, repair, sha256, uninstall
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_call_args_and_depth_columns(self):
+        draw = {'args': {'index_count': 6, 'instance_count': 40}, 'depth_target': {
+                    'view_format': 40, 'flags': 0, 'resource': {'id': 'A', 'width': 8, 'height': 4}},
+                'depth_state': {'default': 0, 'depth_enable': 1, 'depth_write': 0, 'depth_func': 3,
+                                'stencil_enable': 1, 'stencil_ref': 2}}
+        self.assertEqual(call_args(draw), 'index_count=6, instance_count=40')
+        self.assertEqual(depth(draw), 'DSV A · 8×4 · fmt 40 · 测试 EQUAL · 写入 关 · 模板开 ref=2')
+        default = {'depth_target': None, 'depth_state': {'default': 1, 'depth_enable': 1, 'depth_write': 1,
+                                                          'depth_func': 2, 'stencil_enable': 0, 'stencil_ref': 0}}
+        self.assertEqual(depth(default), '无 DSV · 测试 LESS · 写入 开 · 默认状态')
+        indirect = {'args': {'buffer': {'id': 'B', 'dimension': 1, 'bytes': 20}, 'offset': 4}}
+        self.assertIn('B @ 4', call_args(indirect))
+        # Version 2 captures have neither field; the columns stay empty.
+        self.assertEqual((call_args({}), depth({})), ('', ''))
+
     def test_truncated_capture_never_reports_complete(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/'capture_1.jsonl'

@@ -141,6 +141,44 @@ def views(items):
     return '; '.join(result)
 
 
+DEPTH_FUNCS = {1: 'NEVER', 2: 'LESS', 3: 'EQUAL', 4: 'LESS_EQUAL', 5: 'GREATER', 6: 'NOT_EQUAL',
+               7: 'GREATER_EQUAL', 8: 'ALWAYS'}
+
+
+def call_args(event):
+    args = event.get('args')
+    if not isinstance(args, dict):
+        return ''
+    if 'buffer' in args:
+        return f"间接参数缓冲 {(args['buffer'] or {}).get('id', '?')} @ {args.get('offset', '?')}（内容未读回）"
+    return ', '.join(f'{key}={value}' for key, value in args.items())
+
+
+def depth(event):
+    if 'depth_state' not in event:
+        return ''
+    target = event.get('depth_target')
+    if target:
+        resource = target.get('resource') or {}
+        text = (f"DSV {resource.get('id', '?')} · {resource.get('width', '?')}×{resource.get('height', '?')}"
+                f" · fmt {target.get('view_format', '?')}")
+        if target.get('flags'):
+            text += f" · 只读标志 {target['flags']}"
+    else:
+        text = '无 DSV'
+    state = event['depth_state']
+    if state.get('depth_enable'):
+        func = DEPTH_FUNCS.get(state.get('depth_func'), state.get('depth_func'))
+        text += f" · 测试 {func} · 写入 {'开' if state.get('depth_write') else '关'}"
+    else:
+        text += ' · 深度测试关'
+    if state.get('stencil_enable'):
+        text += f" · 模板开 ref={state.get('stencil_ref')}"
+    if state.get('default'):
+        text += ' · 默认状态'
+    return text
+
+
 def analyze(session):
     session = session.resolve(strict=True)
     summaries = []
@@ -153,10 +191,11 @@ def analyze(session):
                    'context_types': dict(Counter(str(e.get('context_type')) for e in events))}
         summaries.append(summary)
         write_json(path.with_suffix('.summary.json'), summary)
-        lines = ['event\tcall\tshader_file\tshader_name\tinputs\toutputs']
+        lines = ['event\tcall\targs\tshader_file\tshader_name\tinputs\toutputs\tdepth']
         table = []
         for e in events:
-            columns = [str(e['event']), e['call'], e.get('shader_file',''), e.get('shader_name',''), views(e.get('inputs',[])), views(e.get('outputs',[]))]
+            columns = [str(e['event']), e['call'], call_args(e), e.get('shader_file',''), e.get('shader_name',''),
+                       views(e.get('inputs',[])), views(e.get('outputs',[])), depth(e)]
             lines.append('\t'.join(s.replace('\t',' ').replace('\n',' ') for s in columns))
             table.append('<tr>'+''.join('<td>'+html.escape(s)+'</td>' for s in columns)+'</tr>')
         path.with_suffix('.topology.tsv').write_text('\n'.join(lines), encoding='utf8')
@@ -164,8 +203,8 @@ def analyze(session):
         report = f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>{title}</title>
 <style>body{{font:14px/1.6 system-ui;background:#0d1421;color:#d9e5f6;margin:32px}}h1{{color:#81d4fc}}.note{{padding:16px;background:#18243a;border-left:4px solid #81d4fc}}table{{border-collapse:collapse;width:100%;margin-top:24px}}th,td{{text-align:left;padding:10px;border-bottom:1px solid #29354b;vertical-align:top;overflow-wrap:anywhere}}th{{background:#18243a;position:sticky;top:0}}tr:hover{{background:#17233a}}td:first-child{{color:#81d4fc}}</style>
 <h1>D3D11 调用与资源绑定 · {title}</h1><div class="note">完整：{complete} · 调用数：{len(events)}<br>
-这是按调用顺序记录的立即上下文状态快照，包含 Draw / Dispatch 及绑定关系。没有 Present 帧边界、GPU 耗时、纹理像素或常量值；不可据此直接判断一帧开销或重放。资源地址仅作本次采样中的关联线索。</div>
-<table><thead><tr><th>事件</th><th>调用</th><th>字节码</th><th>调试名称</th><th>输入资源</th><th>输出资源</th></tr></thead><tbody>{''.join(table)}</tbody></table></html>'''
+这是按调用顺序记录的立即上下文状态快照，包含 Draw / Dispatch 的调用参数、绑定关系与深度状态。没有 Present 帧边界、GPU 耗时、纹理像素、常量值或间接参数缓冲内容；不可据此直接判断一帧开销或重放。资源地址仅作本次采样中的关联线索。</div>
+<table><thead><tr><th>事件</th><th>调用</th><th>调用参数</th><th>字节码</th><th>调试名称</th><th>输入资源</th><th>输出资源</th><th>深度</th></tr></thead><tbody>{''.join(table)}</tbody></table></html>'''
         path.with_suffix('.html').write_text(report, encoding='utf8')
     write_json(session/'analysis.json', {'captures': summaries, 'shaders': shader_index})
     print(json.dumps({'session': str(session), 'captures': summaries, 'shader_count': len(shader_index)}, ensure_ascii=False, indent=2))

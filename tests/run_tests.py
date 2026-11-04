@@ -50,6 +50,12 @@ def main():
                     assert event['call'] == 'Draw' and event['context_type'] == 0
                     assert event['outputs'][0]['resource']['width'] == 4
                     assert event['outputs'][0]['resource']['height'] == 4
+                    assert event['args'] == {'vertex_count': 3, 'start_vertex': 0}, event['args']
+                    assert event['depth_target']['view_format'] == 45, event['depth_target']  # D24_UNORM_S8_UINT
+                    assert event['depth_target']['resource']['width'] == 4
+                    assert event['depth_state'] == {'default': 0, 'depth_enable': 1, 'depth_write': 0,
+                                                    'depth_func': 4, 'stencil_enable': 0,
+                                                    'stencil_ref': 5}, event['depth_state']
                     assert (session/event['shader_file']).is_file()
                 analyze(session)
                 disassemble(session)
@@ -61,6 +67,8 @@ def main():
         events, complete, errors = read_capture(compute_session/'capture_1.jsonl')
         assert complete and not errors and len(events) == 1
         assert events[0]['call'] == 'Dispatch'
+        assert events[0]['args'] == {'x': 1, 'y': 1, 'z': 1}, events[0]['args']
+        assert 'depth_state' not in events[0]
         assert events[0]['outputs'][0]['resource']['width'] == 4
         assert events[0]['shader_file'].startswith('cs_')
         assert (compute_session/events[0]['shader_file']).is_file()

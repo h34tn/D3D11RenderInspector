@@ -125,7 +125,7 @@ python tools/inspector.py capture "D:\Captures\MyGame\pid_12345_1340000000000000
 |---|---|
 | `proxy.log` | 转发与观察器安装状态 |
 | `ps_*.dxbc`、`cs_*.dxbc` | 从观察器安装后创建的像素/计算 Shader 导出的原始字节码 |
-| `capture_N.jsonl` | 按调用顺序记录的立即上下文状态 |
+| `capture_N.jsonl` | 按调用顺序记录的立即上下文状态（版本 3 起含 `args` 调用参数，图形调用另含 `depth_target` / `depth_state`） |
 | `capture.request` | 待消费请求，开始采样后删除 |
 
 JSONL 最后的 `{"type":"end","events":N}` 与实际事件数一致，才算完整。程序异常退出时，缓冲区中的尾部数据可能丢失；分析器会标记不完整采样。
@@ -168,7 +168,7 @@ python tools/inspector.py uninstall "D:\Games\YourTestGame"
 ## 支持边界
 
 - 当前覆盖 Windows x64 / D3D11，观察器要求 Device5 / Context4 与原接口指针一致；其他接口布局会跳过观察。D3D9、D3D12、Vulkan、OpenGL、x86、移动端不在本版本范围内。
-- 记录 Draw 系列、Dispatch 系列调用时的 PS/CS、SRV、RTV / CS UAV、常量缓冲区身份与大小，以及部分混合状态。常量值、纹理像素、Draw 参数、完整管线状态尚未采集；CS UAV 只覆盖前 8 槽。
+- 记录 Draw 系列、Dispatch 系列调用时的 PS/CS、SRV、RTV / CS UAV、常量缓冲区身份与大小、部分混合状态、调用参数（顶点/索引/实例数、线程组数），以及图形调用的 DSV 与深度模板状态（`default=1` 表示未绑定状态对象、按 D3D11 默认值记录）。间接调用只记录参数缓冲身份与偏移，不读回内容。常量值、纹理像素、光栅化等其余管线状态尚未采集；CS UAV 只覆盖前 8 槽。
 - 没有 Present / 帧边界、GPU 时间戳、资源内容、回放器；不是 `.rdc`。
 - Deferred Context 不采绑定快照；`ExecuteCommandList` 只留提交标记，不展开内部命令。不能据此证明命令列表内部的实际执行顺序。
 - 资源 ID 是进程地址，可能复用；没有生命周期跟踪。PS/CS 字节码只覆盖安装观察器后经所钩入口创建的对象，不覆盖所有新版本创建入口或更早创建的 Shader。
