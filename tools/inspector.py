@@ -268,6 +268,17 @@ def main():
     restore = commands.add_parser('repair', help='Restore a missing managed DLL, preserving the old manifest')
     restore.add_argument('directory', type=Path)
     restore.add_argument('--binary', type=Path, default=PROJECT/'build/d3d11.dll')
+    diagnostic = commands.add_parser('diagnose', help='Read-only deployment and runtime loading diagnosis')
+    diagnostic.add_argument('--exe', type=Path, required=True)
+    diagnostic.add_argument('--pid', type=int)
+    diagnostic.add_argument('--output', type=Path, default=default_output())
+    diagnostic.add_argument('--trace', type=Path, help='Optional Process Monitor CSV for delete attribution')
+    startup = commands.add_parser('run-startup', help='Launch x64 target with entry-time hooks; no DLL deployment')
+    startup.add_argument('--exe', type=Path, required=True)
+    startup.add_argument('--output', type=Path, default=default_output())
+    startup.add_argument('--mode', choices=['observe', 'forward', 'device-only'], default='observe')
+    startup.add_argument('--wait', action='store_true', help='Wait up to 90 seconds for target exit (tests)')
+    startup.add_argument('arguments', nargs=argparse.REMAINDER)
     run = commands.add_parser('run', help='Launch target with per-process inspector environment')
     run.add_argument('--exe', type=Path, required=True)
     run.add_argument('--output', type=Path, default=default_output())
@@ -283,6 +294,23 @@ def main():
     elif args.command == 'install': install(args.directory, args.binary, args.name)
     elif args.command == 'uninstall': uninstall(args.directory)
     elif args.command == 'repair': repair(args.directory, args.binary)
+    elif args.command == 'diagnose':
+        from launch_diagnostics import diagnose
+        report = diagnose(args.exe, args.output, args.pid, args.trace)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        raise SystemExit(0 if report['status'] in ('forwarding', 'observing', 'shader_only') else 2)
+    elif args.command == 'run-startup':
+        executable = args.exe.resolve(strict=True)
+        pe_exports(executable)
+        launcher = PROJECT / 'build/startup_launcher.exe'
+        hook = PROJECT / 'build/inspector_hook.dll'
+        if not launcher.is_file() or not hook.is_file():
+            raise ValueError('Run build_injected.cmd first; see README for the pinned Microsoft Detours dependency')
+        arguments = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
+        command = [str(launcher), *(['--wait'] if args.wait else []), str(hook), str(executable), *arguments]
+        result = subprocess.run(command, cwd=executable.parent,
+                                env=dict(os.environ, D3D11_PROXY_OUTPUT=str(args.output.resolve()), D3D11_PROXY_MODE=args.mode))
+        raise SystemExit(result.returncode)
     elif args.command == 'run':
         arguments = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
         process = launch(args.exe, args.output, args.mode, arguments)

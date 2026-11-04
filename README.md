@@ -72,9 +72,42 @@ python tools/inspector.py sessions --output "D:\Captures\MyGame"
 
 没有会话/日志不代表没有渲染，可能是程序没有加载此 DLL、采用 D3D12/Vulkan、加载 DLL 后尚未调用导出，或输出目录不可写。部分程序显式加载 System32 的 D3D11，本地同名代理不会自动接管。
 
+可用通用只读诊断核对安装哈希、实际模块路径与对应 PID/创建时间的会话：
+
+```powershell
+python tools/inspector.py diagnose --exe "D:\Games\YourTestGame\Game.exe" --pid 12345 --output "D:\Captures\MyGame"
+```
+
+返回 JSON；退出码 0 表示已确认纯转发、仅 Shader 或调用观察模式，2 表示接入尚未确认。诊断区分代理缺失/变化、存在但未加载、已加载但没有会话、权限不足与观察器未就绪。GUI 启动后 10 秒仍无对应会话时也会给出诊断，停止无限等待。启动器子进程需用实际渲染 PID 重新诊断。
+
+DLL 消失时可使用微软 [Process Monitor](https://learn.microsoft.com/sysinternals/downloads/procmon) 记录启动过程，导出英文列名的 CSV，再在上面的命令中添加 `--trace "D:\Captures\launch.csv"`。工具只从成功的文件删除标记事件中归属请求进程；文件缺失、请求 Delete 权限、加载系统 DLL 都不能单独证明谁删除了代理或是否采用绝对路径加载。原始追踪保留在本地，不自动上传。诊断不会修复、注入、结束进程或改变加载策略。
+
+若目标主动移除代理，标准同目录部署不能建立观察入口。可在目标允许调试/模块加载时尝试下文的 `run-startup`；仅改名 DLL 不会自动产生加载入口，不能承诺所有游戏通用接入。
+
 旧内部测试包采用过专门的加载名调整；这里没有打包该游戏二进制或通用二进制修补器。对显式加载系统 DLL 的程序，优先在自有测试程序/引擎加载入口指定代理 DLL。`install --name custom.dll` 仅支持使用已配置好的其他加载名，本身不会改变程序的加载行为。当前也不提供附加到已运行进程的功能。
 
 GUI 会自动遵循有效安装清单中的自定义 DLL 名称，包括复用、缺失修复和卸载；首次 GUI 安装仍使用 `d3d11.dll`。已有旧代理不能直接覆盖，应退出目标程序，明确备份和恢复方式后再迁移。启动后若检测到本次 PID 的旧版 `D3D11Proxy_<PID>.log`，界面会明确提示旧代理不使用当前会话目录，不再只显示等待会话；旧版固定输出目录和共享采样请求不会自动导入或触发。
+
+## 可选：在入口前加载观察器（Windows x64，CLI）
+
+对于未加载同目录代理的程序，可选择启动接入方式。它通过 Windows 调试事件运行到 EXE 入口，恢复临时入口断点后分离调试器，再从工具目录加载 `inspector_hook.dll`，在加载器锁外初始化 D3D11 设备创建钩子，最后恢复入口线程。只作用于本次创建的进程，不附加已有进程、不修改磁盘上的 EXE、不向目标目录复制 DLL；不自动处理启动器子进程。入口之前创建的设备不在覆盖范围内。
+
+此方式需要额外的原生依赖：[Microsoft Detours v4.0.1](https://github.com/microsoft/Detours/tree/v4.0.1)（MIT），用于保存原函数指令和事务性安装设备创建钩子；Python 仍仅使用标准库。依赖源码及构建产物留在忽略目录，构建核对固定提交且拒绝修改过的依赖：
+
+重新构建前先退出加载观察器的目标进程，避免覆盖正在使用的 DLL。
+
+```powershell
+.\build.cmd
+git clone --depth 1 --branch v4.0.1 https://github.com/microsoft/Detours.git build/detours-source
+# 固定提交：e4bfd6b03e50de46b47abfbd1e46b384f0c5f833
+.\build_injected.cmd
+python tests/run_startup_tests.py
+python tools/inspector.py run-startup --exe "D:\Games\YourTestGame\Game.exe" --output "D:\Captures\MyGame" --mode observe -- -force-d3d11
+```
+
+首次仍可用 `--mode forward`。`--wait` 供独立测试使用，最多等目标退出 90 秒；等待超时不会结束已启动的目标。初始化失败会清理本次尚未恢复入口的子进程。启动器退出码 0 表示钩子初始化成功，仍须检查游戏是否存活、`proxy.log` 中 Device5 / Context4 状态和完整采样，不能据此认定游戏兼容。
+
+采样输出与原代理使用相同格式，可在 GUI 中打开会话。`diagnose` 的安装文件检查针对同目录代理；启动接入方式应使用 `sessions` 和会话日志核实。启动接入不是 RenderDoc 后端，仍没有帧边界、GPU 时间或纹理像素。它保留真实 D3D11 COM 对象，但仍有虚表观察的兼容性边界；目标拒绝调试/模块加载时会失败，不改变目标的保护设置。
 
 ## 触发一次短采样
 

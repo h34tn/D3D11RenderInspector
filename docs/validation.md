@@ -59,3 +59,25 @@ GUI 现已遵循安装清单中的自定义 DLL 名称，并能识别本次启�
 恢复方式：退出游戏，通过工具卸载当前清单中哈希匹配的新版代理；确认目标 DLL 和清单位置已空，再将上述两份备份分别改回 `bld11.dll` 和 `.d3d11-inspector-install.json`。不要覆盖现有文件；恢复旧代理后仍使用旧输出机制。
 
 随后通过新版管理员 GUI 启动游戏，确认新会话 `pid_94700_134371093607459850` 出现，日志标记为 `D3D11RenderInspector-0.1-private-tail`，Device5 / Context4 观察器安装成功。启动场景的 32 个 DrawIndexed 事件采样具有完整结束记录、连续序号和正确事件数，生成 HTML 报告；分析时索引了 3054 个 Shader 文件。证据见 [live-game-result.json](../test-results/20261022_legacy_proxy/live-game-result.json) 和本地 `test-results/20261022_legacy_proxy/live-gui.png`。这些证据覆盖此次游戏启动和短采样，不代表整帧、所有场景或 GPU 性能验收。
+
+## 通用接入诊断与另一目标的接入失败（2026-11-04）
+
+代理未修改，SHA-256 仍为 `f6853556e578226db9c94c27ff14ea7266b45f3d08181b8a48aaf01012963d72`。本轮先运行 `python tests/run_tests.py`，退出码 0，[result.json](../test-results/20261104_105751/result.json) 的 `passed` 为 `true`；这是独立测试证据。
+
+新增通用 `diagnose` 命令与 GUI 无会话诊断，仅修改 Python 工具、测试及文档。`python -m unittest discover -s tests -p "test_*.py"` 退出码 0，37 项通过，包含实际当前 Python 进程模块枚举、权限不足、PID 重用、枚举期间身份变化、自定义代理名称、哈希变化与无效清单保护及精确文件路径的成功删除事件归属。证据为 [diagnostic-result.json](../test-results/genshin-analysis/diagnostic-result.json) 与同目录 `diagnostic-tests.log`；其他进程/驱动/游戏兼容性不由这些测试证明。
+
+在用户指定的原神客户端以 `forward` 模式进行受控启动：包头/游戏日志版本为 7.2.0，DX11 启动成功，但未建立代理会话。微软 Process Monitor 记录 PID 46524 的 `YuanShen.exe` 于 `11:04:00.3239347` 对部署的代理成功执行 `SetDispositionInformationEx`，包含 `FILE_DISPOSITION_DELETE`。因此本次可以归属删除请求的进程，但不能从进程名确定其内部具体模块或机制。原始证据为本地 `test-results/genshin-analysis/launch-trace.pml`、`launch-trace.csv`，提取结果为 [proxy-file-events.json](../test-results/genshin-analysis/proxy-file-events.json)。
+
+新命令针对该现场返回 `proxy_missing`、退出码 2，且从追踪中识别上述删除事件，见 [diagnosis.json](../test-results/genshin-analysis/diagnosis.json)。这验证了失败诊断，未解决该客户端的代理接入，也没有取得实时地形数据；未修改游戏二进制或其加载策略。原始采样/资源与追踪继续保留在忽略目录中。
+
+## 启动接入与原神实际短采样（2026-11-04，后续）
+
+以上“尚未解决”描述的是同目录代理阶段。后续新增可选的 `run-startup` CLI 和独立启动器，使用 Microsoft Detours v4.0.1 固定提交 `e4bfd6b03e50de46b47abfbd1e46b384f0c5f833`，在入口前加载工具目录中的观察器并截获系统 D3D11 设备创建。未向通用代码写入目标路径、进程名或游戏补丁。`build.cmd` 和 `build_injected.cmd` 均退出码 0；本轮原代理的完整独立测试 [result.json](../test-results/20261104_121105/result.json) 的 `passed` 为 `true`。
+
+启动模式独立测试覆盖显式加载 `System32/d3d11.dll` 的硬件/WARP/两个设备创建入口、SINGLETHREADED 标志、三种观察模式、逐像素绘制读回、计算 UAV 读回、Shader 导出、有界采样完整性和反汇编；测试还使用带空格的 EXE 路径。入口之前加载一个缺少初始化导出的普通代理会被拒绝，不启动目标。证据入口为忽略目录 `test-results/startup-latest.txt`，每次结果含各子命令退出码与 `passed`。这里仍不是游戏场景或其他驱动/游戏组合的兼容性证明。
+
+实测加载的观察器 SHA-256：`ae6567e62723171d87c529658481bca25032045b959799569490baaca1c9345f`；启动器 SHA-256：`1217549ca00cca29377363075c5b30da4edf3590739a8c3ad908147568cfbf60`。原神先以 forward 模式启动 PID 63896，设备和交换链创建成功，模块路径为工具目录中的 `build/inspector_hook.dll`。随后正常退出并以 observe 模式启动 PID 53676，会话为 `captures/genshin-startup-observe/pid_53676_134382391903414890`；Device5/Context4 观察器安装成功，首次 32 事件采样具有完整结束记录和连续事件编号，包含 Draw、DrawIndexed、DrawIndexedInstanced。证据为 [startup-live-result.json](../test-results/genshin-analysis/startup-live-result.json)、同目录 `startup-game-live.json` 及会话中的 `proxy.log`、`capture_1.jsonl`、`capture_1.summary.json`。
+
+该短采样主要使用 `miHoYo/Scene/Login Base`，确认的是登录场景接入与调用采样，不代表已经采集可游玩地形、完整帧或 GPU 耗时。没有修改磁盘上的游戏 EXE；调试器临时入口断点在恢复入口前还原，观察器钩子固定到进程退出，不支持运行中卸载。此前一次官方 RenderDoc 1.46 标准启动对照在设备创建阶段退出，不能将其启动返回的控制 ID 当作捕获成功。
+
+用户随后确认已进入游戏，采集 `capture_2.jsonl`：2000 事件，完整结束记录、连续编号、无解析错误；1121 份 Shader 成功反汇编。其中实际调用 CTS Terrain、BlendStone 和 Terrain Base Map；代表事件 30 的两张 1280×720 输出与事件 109 的岩石输入资源对应，PS 反汇编可核对高度竞争及按深度差混合颜色/法线的代码。现场细节和局限见统一分析文档目录中的 [terrain-runtime-findings.txt](../../GenshinImpact/terrain-runtime-findings.txt) 与原始 [terrain-runtime-evidence.json](../test-results/genshin-analysis/terrain-runtime-evidence.json)。这些数据仍不是完整帧、纹理读回、常量读取或 GPU 性能测试。

@@ -6,6 +6,13 @@
 #include <d3d11.h>
 #include <intrin.h>
 #include <windows.h>
+#ifdef INSPECTOR_INJECTED
+#include <detours.h>
+#include <tlhelp32.h>
+#include <vector>
+static decltype(&D3D11CreateDevice) injectedCreate = nullptr;
+static decltype(&D3D11CreateDeviceAndSwapChain) injectedSwap = nullptr;
+#endif
 extern "C" void InstallObservers(ID3D11Device *, ID3D11DeviceContext *);
 
 static HMODULE selfModule = nullptr, realModule = nullptr;
@@ -113,6 +120,9 @@ extern "C" HRESULT WINAPI ProxyCreateDevice(IDXGIAdapter *adapter, D3D_DRIVER_TY
 {
     using Fn = decltype(&D3D11CreateDevice);
     auto fn = (Fn)Resolve(indexCreateDevice);
+#ifdef INSPECTOR_INJECTED
+    fn = injectedCreate;
+#endif
     if (!fn)
         return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
     Log("D3D11CreateDevice enter");
@@ -136,6 +146,9 @@ extern "C" HRESULT WINAPI ProxyCreateDeviceAndSwapChain(IDXGIAdapter *adapter, D
 {
     using Fn = decltype(&D3D11CreateDeviceAndSwapChain);
     auto fn = (Fn)Resolve(indexCreateSwap);
+#ifdef INSPECTOR_INJECTED
+    fn = injectedSwap;
+#endif
     if (!fn)
         return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
     Log("D3D11CreateDeviceAndSwapChain enter");
@@ -149,6 +162,83 @@ extern "C" HRESULT WINAPI ProxyCreateDeviceAndSwapChain(IDXGIAdapter *adapter, D
     SetLastError(apiError);
     return hr;
 }
+#ifdef INSPECTOR_INJECTED
+// Invoked by the launcher outside the loader lock, before resuming the entry thread.
+extern "C" __declspec(dllexport) DWORD WINAPI InspectorInitialize(LPVOID)
+{
+    static LONG attempted = 0;
+    if (InterlockedCompareExchange(&attempted, 1, 0) != 0)
+        return ERROR_ALREADY_INITIALIZED;
+    if (!InitOnceExecuteOnce(&initOnce, Initialize, nullptr, nullptr))
+        return ERROR_DLL_INIT_FAILED;
+    injectedCreate = (decltype(injectedCreate))GetProcAddress(realModule, "D3D11CreateDevice");
+    injectedSwap = (decltype(injectedSwap))GetProcAddress(realModule, "D3D11CreateDeviceAndSwapChain");
+    if (!injectedCreate || !injectedSwap)
+        return ERROR_PROC_NOT_FOUND;
+    HMODULE pinned = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                            reinterpret_cast<LPCWSTR>(&InspectorInitialize), &pinned))
+        return GetLastError();
+    LONG error = DetourTransactionBegin();
+    if (error != NO_ERROR)
+        return (DWORD)error;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+    {
+        DetourTransactionAbort();
+        return GetLastError();
+    }
+    THREADENTRY32 entry{sizeof(entry)};
+    std::vector<HANDLE> threads;
+    if (!Thread32First(snapshot, &entry))
+        error = (LONG)GetLastError();
+    else
+    {
+        do
+        {
+            if (entry.th32OwnerProcessID != GetCurrentProcessId())
+                continue;
+            if (entry.th32ThreadID == GetCurrentThreadId())
+            {
+                error = DetourUpdateThread(GetCurrentThread());
+            }
+            else
+            {
+                HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
+                                               THREAD_QUERY_INFORMATION,
+                                           FALSE, entry.th32ThreadID);
+                if (!thread)
+                {
+                    error = (LONG)GetLastError();
+                    break;
+                }
+                threads.push_back(thread);
+                error = DetourUpdateThread(thread);
+            }
+            if (error != NO_ERROR)
+                break;
+        } while (Thread32Next(snapshot, &entry));
+        if (error == NO_ERROR && GetLastError() != ERROR_NO_MORE_FILES)
+            error = (LONG)GetLastError();
+    }
+    CloseHandle(snapshot);
+    if (error == NO_ERROR)
+        error = DetourAttach(&(PVOID &)injectedCreate, ProxyCreateDevice);
+    if (error == NO_ERROR)
+        error = DetourAttach(&(PVOID &)injectedSwap, ProxyCreateDeviceAndSwapChain);
+    if (error == NO_ERROR)
+        error = DetourTransactionCommit();
+    else
+        DetourTransactionAbort();
+    for (HANDLE thread : threads)
+        CloseHandle(thread);
+    char message[160];
+    _snprintf_s(message, sizeof(message), _TRUNCATE, "startup hooks result=%ld mode=%ls", error,
+                InspectorMode().c_str());
+    Log(message);
+    return (DWORD)error;
+}
+#endif
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)

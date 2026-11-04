@@ -320,6 +320,11 @@ class InspectorApp:
                 if (watch and root == watch['output'] and
                         not any(item['pid'] == watch['pid'] for item in items)):
                     diagnostic = legacy_proxy_diagnostic(watch['directory'], watch['pid'], watch['started'])
+                    if not diagnostic and time.time() - watch['started'] >= 10:
+                        from launch_diagnostics import diagnose
+                        report = diagnose(watch['executable'], Path(root), watch['pid'])
+                        if report['status'] not in ('forwarding', 'observing', 'shader_only'):
+                            diagnostic = report['message']
                     if diagnostic:
                         self.messages.put(('launch_diagnostic', (watch, diagnostic)))
             except Exception as error:
@@ -399,7 +404,7 @@ class InspectorApp:
             process = launch(executable, output, mode, arguments, detach_output=True)
             self.messages.put(('process', process))
             self.messages.put(('launch_watch', dict(pid=process.pid, directory=executable.parent,
-                                                    started=started, output=str(output))))
+                                                    executable=executable, started=started, output=str(output))))
             log(f'已启动 PID {process.pid}；请在会话列表确认代理是否加载。')
             return ('游戏已启动，等待会话出现。能否观察以会话状态和代理日志为准。', None)
         self.tree.selection_remove(*self.tree.selection())
