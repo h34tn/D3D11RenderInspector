@@ -10,6 +10,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 from inspector import read_capture, sha256, analyze, disassemble
+from state_args_checks import validate_state_args
 
 
 def main():
@@ -65,6 +66,21 @@ def main():
                 analyze(session)
                 disassemble(session)
             print(name, 'PASS', flush=True)
+        report['state_args_sessions'] = {}
+        for driver in ['hardware', 'warp']:
+            state_root = output / ('state_args_' + driver)
+            result = subprocess.run([sys.executable, str(ROOT / 'tools/inspector.py'), 'run-startup',
+                                     '--exe', str(ROOT / 'build/state_args_smoke.exe'), '--output', str(state_root),
+                                     '--mode', 'observe', '--wait', '--', system, driver],
+                                    capture_output=True, timeout=110)
+            (output / ('state_args_' + driver + '.log')).write_bytes(result.stdout + result.stderr)
+            report['tests'].append(dict(name='state_args_' + driver, returncode=result.returncode))
+            assert result.returncode == 0, (driver, result.stdout, result.stderr)
+            sessions = list(state_root.glob('pid_*'))
+            assert len(sessions) == 1, sessions
+            validate_state_args(sessions[0])
+            report['state_args_sessions'][driver] = str(sessions[0])
+            print('state_args_' + driver, 'PASS', flush=True)
         report['passed'] = True
     finally:
         (output / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf8')

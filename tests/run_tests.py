@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'tools'))
 from generate_exports import pe_exports
 from inspector import analyze, disassemble, read_capture, sha256
+from state_args_checks import validate_state_args
 
 
 def main():
@@ -75,6 +76,15 @@ def main():
         analyze(compute_session)
         disassemble(compute_session)
         report['compute_session'] = str(compute_session)
+        report['state_args_sessions'] = {}
+        for driver in ['hardware', 'warp']:
+            state_root = output / ('state_args_' + driver)
+            run('state_args_' + driver, [str(ROOT / 'build/state_args_smoke.exe'), str(proxy), driver],
+                dict(os.environ, D3D11_PROXY_OUTPUT=str(state_root), D3D11_PROXY_MODE='observe'))
+            sessions = list(state_root.glob('pid_*'))
+            assert len(sessions) == 1, sessions
+            validate_state_args(sessions[0])
+            report['state_args_sessions'][driver] = str(sessions[0])
         report['passed'] = True
     except Exception as error:
         report['passed'] = False

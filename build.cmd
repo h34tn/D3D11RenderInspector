@@ -25,4 +25,6 @@ if errorlevel 1 exit /b 1
 cl /nologo /std:c++17 /utf-8 /W4 /O2 /MT /EHsc /Isrc tests\compute_smoke.cpp src\config.cpp /Fo"build\\" /Fe:build\compute_smoke.exe
 if errorlevel 1 exit /b 1
 python tools\generate_exports.py --output build\generated --verify build\d3d11.dll
+if errorlevel 1 exit /b 1
+cl /nologo /std:c++17 /utf-8 /W4 /O2 /MT /EHsc /Isrc tests\state_args_smoke.cpp src\config.cpp /Fo"build\\" /Fe:build\state_args_smoke.exe
 exit /b %errorlevel%

@@ -193,6 +193,8 @@ test-results/         本机验证证据，不入版本控制
 
 这是从已验证实验代码整理的独立工程。当前版本的重建与验收结果见 [验证记录](docs/validation.md)，后续修改应重新运行 `build.cmd` 和 `python tests/run_tests.py`。
 
+原生参数与深度补测在硬件驱动和 WARP 上验证实例绘制、间接调用、默认深度状态和只读 DSV，并检查实际读回与采样记录。启动注入路径使用 `build_injected.cmd` 和 `python tests/run_startup_tests.py` 验证相同用例。
+
 ## 使用 Codex 继续开发
 
 项目指引位于根目录 [AGENTS.md](AGENTS.md)，包含源码导航、构建测试、兼容性限制和 Git 约定。从项目根目录开始会话：

@@ -89,3 +89,13 @@ GUI 现已遵循安装清单中的自定义 DLL 名称，并能识别本次启�
 `render_smoke` 改为绑定 4×4 D24S8 DSV 与非默认深度状态（LESS_EQUAL、写入关、ref=5），测试断言记录值与设置一致；计算测试断言线程组参数且无深度字段。`build.cmd`、`build_injected.cmd` 退出码 0，MSVC `/W4` 无警告。`python tests/run_tests.py` 退出码 0，[result.json](../test-results/20261104_141000/result.json) `passed: true`，Python 回归 38 项通过；`python tests/run_startup_tests.py` 退出码 0，`test-results/startup_20261104_141019/result.json` `passed: true`。
 
 代理 DLL SHA-256：`2128d84590f602680e1fd3e42347f8dd659535902d5dac744d936c0300554cdb`；启动观察器 `inspector_hook.dll` SHA-256：`6ef3c4e9c5e07eac91edebc8ed3be231ed3e03a8c0c9f87819d1737d1f672fa6`。以上为独立测试证据，尚未用新版本在目标游戏中采样。
+
+### 参数与深度状态原生补测（2026-11-04）
+
+新增 `tests/state_args_smoke.cpp`，通过真实顶点、索引和实例缓冲验证非零起始偏移、负 base vertex、双实例左右分色，以及两个间接绘制入口和 `DispatchIndirect` 的非零参数缓冲偏移。每次绘制逐像素读回，间接计算检查完整 4×2 UAV；观察器仍只记录间接缓冲身份与偏移，不读取其内容。
+
+深度覆盖默认空状态对象的近处写入与远处遮挡、解绑 DSV、关闭深度测试、D24S8 视图的三种只读标志、模板匹配与拒绝。只读用例同时关闭深度/模板写入，逐字节比较绘制前后的深度模板资源，验证这种有效绑定组合的数据保持不变，不单独证明只读标志对写入请求的处理。共享 Python 校验器核对全部 14 个事件的参数、状态、资源关联、完整结束记录，以及实际生成的 TSV 和 DXBC 反汇编。
+
+`build.cmd` 与 `build_injected.cmd` 均退出 0；代理与启动注入两条路径分别运行硬件驱动和 WARP，共 4 组、56 个补测事件全部通过。完整套件证据：[代理 result.json](../test-results/20261104_144050/result.json)、[启动注入 result.json](../test-results/startup_20261104_144050/result.json)，两份均为 `passed: true`；正常子命令退出码均为 0，拒绝非 hook DLL 的负向用例按预期退出 3。代理套件中的 38 项 Python 回归也通过。
+
+本轮代理 DLL SHA-256：`b0f6064b70db89c5937fb9cd569d9841af999bc213aa3762acd3c0b9a6575624`；`inspector_hook.dll`：`cfff43ce6d635ba61524d26137dd822249c345d57900f8c8e39a5ebb7449e85e`；`startup_launcher.exe`：`59f3cf156470e9a3d5bd615b94777910cf49b8d7955518ddd1c2305daaa35d03`。本轮仅增加测试与验证记录，未修改观察器实现，未重新接入目标游戏；结果不扩展到其他驱动、游戏场景或 GPU 性能结论。
