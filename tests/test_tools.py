@@ -1,12 +1,14 @@
 import json
 from pathlib import Path
+import struct
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'tools'))
-from inspector import call_args, capture, depth, install, read_capture, repair, sha256, uninstall
+from inspector import (call_args, capture, depth, dds_to_png, install, read_capture, read_dds, repair, sha256,
+                       uninstall)
 
 
 class AnalysisTests(unittest.TestCase):
@@ -41,6 +43,32 @@ class AnalysisTests(unittest.TestCase):
                 rows = [{'type':'header'}, {'event':event_number,'call':'Draw'}, {'type':'end','events':end_count}]
                 path.write_text('\n'.join(json.dumps(r) for r in rows), encoding='utf8')
                 self.assertEqual(read_capture(path)[1], expected)
+
+    def test_capture_request_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory)
+            (session/'proxy.log').touch()
+            capture(session, 50, constants=True, textures=True, filters=['miHoYo/CTS', 'BlendStone'])
+            self.assertEqual((session/'capture.request').read_bytes(),
+                             b'50\nconstants=1\ntextures=1\nfilter=miHoYo/CTS|BlendStone')
+            (session/'capture.request').unlink()
+            for bad in ['a|b', 'line\nbreak', '中文']:
+                with self.assertRaises(ValueError): capture(session, 5, filters=[bad])
+            self.assertFalse((session/'capture.request').exists())
+
+    def test_dds_reader_and_png_preview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            words = [0] * 37
+            words[0], words[1], words[3], words[4], words[21], words[32] = 0x20534444, 124, 1, 2, 0x30315844, 87
+            path = Path(directory)/'tex.dds'
+            path.write_bytes(struct.pack('<37I', *words) + bytes([1, 2, 3, 4, 5, 6, 7, 8]))
+            info = read_dds(path)
+            self.assertEqual((info['width'], info['height'], info['format']), (2, 1, 87))
+            png = dds_to_png(path)
+            self.assertEqual(png.read_bytes()[:8], b'\x89PNG\r\n\x1a\n')
+            words[32] = 71  # BC1: no preview
+            path.write_bytes(struct.pack('<37I', *words) + bytes(8))
+            self.assertIsNone(dds_to_png(path))
 
     def test_capture_does_not_replace_pending_request(self):
         with tempfile.TemporaryDirectory() as directory:

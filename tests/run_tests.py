@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT/'tools'))
 from generate_exports import pe_exports
 from inspector import analyze, disassemble, read_capture, sha256
 from state_args_checks import validate_state_args
+from readback_checks import validate_readback
 
 
 def main():
@@ -85,6 +86,15 @@ def main():
             assert len(sessions) == 1, sessions
             validate_state_args(sessions[0])
             report['state_args_sessions'][driver] = str(sessions[0])
+        report['readback_sessions'] = {}
+        for driver in ['hardware', 'warp']:
+            readback_root = output / ('readback_' + driver)
+            run('readback_' + driver, [str(ROOT / 'build/readback_smoke.exe'), str(proxy), driver],
+                dict(os.environ, D3D11_PROXY_OUTPUT=str(readback_root), D3D11_PROXY_MODE='observe'))
+            sessions = list(readback_root.glob('pid_*'))
+            assert len(sessions) == 1, sessions
+            validate_readback(sessions[0])
+            report['readback_sessions'][driver] = str(sessions[0])
         report['passed'] = True
     except Exception as error:
         report['passed'] = False

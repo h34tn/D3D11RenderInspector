@@ -10,7 +10,7 @@ def validate_state_args(session):
     assert len(captures) == 1, captures
     capture = captures[0]
     header = json.loads(capture.read_text(encoding='utf8').splitlines()[0])
-    assert header['version'] == 3, header
+    assert header['version'] == 4, header
     events, complete, errors = read_capture(capture)
     assert complete and not errors and len(events) == 14, (complete, errors, len(events))
     direct = [
@@ -66,7 +66,7 @@ def validate_state_args(session):
     assert 'depth_target' not in compute and 'depth_state' not in compute, compute
     assert compute['outputs'][0]['resource']['width'] == 4 and compute['outputs'][0]['resource']['height'] == 2
     assert compute['shader_file'].startswith('cs_') and (session / compute['shader_file']).is_file()
-    assert len(list(session.glob('*.dxbc'))) == 2
+    assert len(list(session.glob('*.dxbc'))) == 3  # VS, PS, CS
     analyze(session)
     disassemble(session)
     with capture.with_suffix('.topology.tsv').open(encoding='utf8', newline='') as stream:

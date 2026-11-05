@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 from inspector import read_capture, sha256, analyze, disassemble
 from state_args_checks import validate_state_args
+from readback_checks import validate_readback
 
 
 def main():
@@ -49,7 +50,8 @@ def main():
             captures = list(session.glob('capture_*.jsonl'))
             assert len(captures) == count, (name, len(captures))
             shaders = list(session.glob('*.dxbc'))
-            assert len(shaders) == (0 if mode == 'forward' else 1 if name == 'compute' else 6), (name, shaders)
+            # render_smoke creates one VS and one PS per device variant; compute_smoke only a CS.
+            assert len(shaders) == (0 if mode == 'forward' else 1 if name == 'compute' else 12), (name, shaders)
             for capture in captures:
                 events, complete, errors = read_capture(capture)
                 assert complete and not errors and len(events) == 1
@@ -81,6 +83,21 @@ def main():
             validate_state_args(sessions[0])
             report['state_args_sessions'][driver] = str(sessions[0])
             print('state_args_' + driver, 'PASS', flush=True)
+        report['readback_sessions'] = {}
+        for driver in ['hardware', 'warp']:
+            readback_root = output / ('readback_' + driver)
+            result = subprocess.run([sys.executable, str(ROOT / 'tools/inspector.py'), 'run-startup',
+                                     '--exe', str(ROOT / 'build/readback_smoke.exe'), '--output', str(readback_root),
+                                     '--mode', 'observe', '--wait', '--', system, driver],
+                                    capture_output=True, timeout=110)
+            (output / ('readback_' + driver + '.log')).write_bytes(result.stdout + result.stderr)
+            report['tests'].append(dict(name='readback_' + driver, returncode=result.returncode))
+            assert result.returncode == 0, (driver, result.stdout, result.stderr)
+            sessions = list(readback_root.glob('pid_*'))
+            assert len(sessions) == 1, sessions
+            validate_readback(sessions[0])
+            report['readback_sessions'][driver] = str(sessions[0])
+            print('readback_' + driver, 'PASS', flush=True)
         report['passed'] = True
     finally:
         (output / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf8')

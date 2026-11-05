@@ -99,3 +99,19 @@ GUI 现已遵循安装清单中的自定义 DLL 名称，并能识别本次启�
 `build.cmd` 与 `build_injected.cmd` 均退出 0；代理与启动注入两条路径分别运行硬件驱动和 WARP，共 4 组、56 个补测事件全部通过。完整套件证据：[代理 result.json](../test-results/20261104_144050/result.json)、[启动注入 result.json](../test-results/startup_20261104_144050/result.json)，两份均为 `passed: true`；正常子命令退出码均为 0，拒绝非 hook DLL 的负向用例按预期退出 3。代理套件中的 38 项 Python 回归也通过。
 
 本轮代理 DLL SHA-256：`b0f6064b70db89c5937fb9cd569d9841af999bc213aa3762acd3c0b9a6575624`；`inspector_hook.dll`：`cfff43ce6d635ba61524d26137dd822249c345d57900f8c8e39a5ebb7449e85e`；`startup_launcher.exe`：`59f3cf156470e9a3d5bd615b94777910cf49b8d7955518ddd1c2305daaa35d03`。本轮仅增加测试与验证记录，未修改观察器实现，未重新接入目标游戏；结果不扩展到其他驱动、游戏场景或 GPU 性能结论。
+
+## 采样格式版本 4：VS 与可选读回（2026-11-04）
+
+观察器新增 VS/GS/HS/DS 字节码导出（与 PS/CS 共用编号），图形调用记录 VS 及其 SRV、常量缓冲（D3D11.1 first/num 常量范围）、顶点/索引缓冲。请求可选 `constants=1`、`textures=1`、`filter=`：对调试名称匹配的调用读回常量/顶点/索引缓冲（单个最多 64 KiB，按内容去重）和输入 2D 纹理 mip 0（DDS）。`capture` CLI 增加 `--constants`、`--textures`、`--filter`，新增 `constants` 命令按 float4 打印读回常量；`analyze` 增加读回列与 8 位纹理 PNG 预览。
+
+新增 `tests/readback_smoke.cpp`：VS 常量以 `VSSetConstantBuffers1` 偏移绑定第 16–31 个常量，渲染结果逐像素证明 GPU 取到偏移后的值；另绑定 PS 常量、RGBA8 与 BC1 两张 PS 纹理、R32_FLOAT VS 纹理、逐顶点与逐实例缓冲。两次调用中只有调试名匹配过滤的一次读回。`tests/readback_checks.py` 核对头部选项、常量范围与逐字节内容、`constants` 行号、三张 DDS 的格式/尺寸/载荷、顶点与实例数据、未匹配调用无任何读回字段、产物去重数量、PNG 预览与 VS 反汇编。`state_args_checks` 相应改为版本 4、VS/PS/CS 共 3 个字节码；启动测试的绘制会话因 VS 导出改为 12 个字节码。
+
+`build.cmd`、`build_injected.cmd` 退出码 0，MSVC `/W4` 无警告。`python tests/run_tests.py` 退出码 0，[result.json](../test-results/20261104_151744/result.json) `passed: true`，含 `readback_hardware` / `readback_warp`，Python 回归 40 项通过；`python tests/run_startup_tests.py` 退出码 0，`test-results/startup_20261104_151811/result.json` `passed: true`，同样含两组读回用例。
+
+代理 DLL SHA-256：`ac97be31181e8383c55e48f703079ec7fbd0e6b3807a3413c1efd17152c7fd3a`；`inspector_hook.dll`：`fdb325be39254bdd61e54abcd450f2d8652cdc70ffc704c7d09060cc700e2a24`。以上为独立测试证据；目标游戏中的读回采样另见统一分析文档目录。
+
+### 提交前复验（2026-11-05）
+
+重新执行 `build.cmd`、`build_injected.cmd`、`python tests/run_tests.py` 和 `python tests/run_startup_tests.py`，均退出 0。[代理结果](../test-results/20261105_111622/result.json)与[启动注入结果](../test-results/startup_20261105_111622/result.json)均为 `passed: true`，各含硬件驱动和 WARP 的参数/深度与读回用例；40 项 Python 回归通过。逐项核对正常子命令退出 0、负向拒绝用例按预期退出 3，以及结果中的二进制哈希与当前构建一致。未重新接入目标游戏。
+
+代理 DLL SHA-256：`b96373f737e1cf0e803a5d60cf72b8654244c7dfc5b5dafacf7c216d12d82d74`；`inspector_hook.dll`：`6a080272319735c270efa492857b91730e3b6e859a8167ef0e5ea68997917d6f`；`startup_launcher.exe`：`9e95240159ea7a393ca79a70e419d0fbd86857774bbc65a6734944ecf20b577b`。
