@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / 'tools'))
 from inspector import read_capture, sha256, analyze, disassemble
 from state_args_checks import validate_state_args
 from readback_checks import validate_readback
+from sequence_checks import validate_sequence
 
 
 def main():
@@ -98,6 +99,19 @@ def main():
             validate_readback(sessions[0])
             report['readback_sessions'][driver] = str(sessions[0])
             print('readback_' + driver, 'PASS', flush=True)
+        report['sequence_sessions'] = {}
+        for driver in ['hardware', 'warp']:
+            for variant in ['legacy', 'factory2']:
+                name = 'sequence_' + driver + '_' + variant
+                result = subprocess.run([sys.executable, str(ROOT/'tools/inspector.py'), 'run-startup',
+                    '--exe', str(ROOT/'build/sequence_smoke.exe'), '--output', str(output/name),
+                    '--mode', 'observe', '--wait', '--', system, driver, variant], capture_output=True, timeout=110)
+                (output/(name+'.log')).write_bytes(result.stdout + result.stderr)
+                report['tests'].append(dict(name=name, returncode=result.returncode))
+                assert result.returncode == 0, (name, result.stdout, result.stderr)
+                session = next((output/name).glob('pid_*'))
+                validate_sequence(session, variant == 'factory2')
+                report['sequence_sessions'][name] = str(session)
         report['passed'] = True
     finally:
         (output / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf8')

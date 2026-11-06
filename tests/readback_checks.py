@@ -16,8 +16,8 @@ def validate_readback(session):
     assert len(captures) == 1, captures
     capture = captures[0]
     header = json.loads(capture.read_text(encoding='utf8').splitlines()[0])
-    assert header['version'] == 4, header
-    assert header['options'] == {'constants': 1, 'textures': 1, 'filter': ['Readback'],
+    assert header['version'] == 5, header
+    assert header['options'] == {'constants': 1, 'textures': 1, 'buffers': 0, 'buffer_limit': 65536, 'frames': 0, 'only_matching': 0, 'filter': ['Readback'],
                                  'data': 'capture_1_data/'}, header
     events, complete, errors = read_capture(capture)
     assert complete and not errors and len(events) == 2, (complete, errors, len(events))

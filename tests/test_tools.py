@@ -79,6 +79,18 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual((session/'capture.request').read_text(), '10')
             with self.assertRaises(ValueError): capture(session, 10001)
 
+    def test_sequence_request_and_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session=Path(directory)
+            (session/'proxy.log').touch()
+            for opts in [dict(frames=601), dict(frames=-1), dict(buffer_limit=65535), dict(buffer_limit=4194305), dict(only_matching=True),
+                         dict(only_matching=True, frames=5), dict(only_matching=True, filters=['Skin'])]:
+                with self.assertRaises(ValueError): capture(session,100,**opts)
+                self.assertFalse((session/'capture.request').exists())
+            capture(session,100,buffers=True,frames=5,only_matching=True,filters=['Skin'])
+            self.assertEqual((session/'capture.request').read_bytes(),
+                b'100\nbuffers=1\nframes=5\nonly_matching=1\nfilter=Skin')
+
     def test_install_and_uninstall_preserve_changed_or_existing_dll(self):
         binary = Path(__file__).resolve().parents[1]/'build/d3d11.dll'
         with tempfile.TemporaryDirectory() as directory:

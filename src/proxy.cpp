@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <d3d11.h>
+#include <dxgi1_6.h>
 #include <intrin.h>
 #include <windows.h>
 #ifdef INSPECTOR_INJECTED
@@ -12,8 +13,13 @@
 #include <vector>
 static decltype(&D3D11CreateDevice) injectedCreate = nullptr;
 static decltype(&D3D11CreateDeviceAndSwapChain) injectedSwap = nullptr;
+static decltype(&CreateDXGIFactory) injectedFactory = nullptr;
+static decltype(&CreateDXGIFactory1) injectedFactory1 = nullptr;
+static decltype(&CreateDXGIFactory2) injectedFactory2 = nullptr;
 #endif
 extern "C" void InstallObservers(ID3D11Device *, ID3D11DeviceContext *);
+extern "C" void InstallSwapChainObserver(IDXGISwapChain *);
+extern "C" void InstallFactoryObserver(IUnknown *);
 
 static HMODULE selfModule = nullptr, realModule = nullptr;
 static INIT_ONCE initOnce = INIT_ONCE_STATIC_INIT;
@@ -158,11 +164,36 @@ extern "C" HRESULT WINAPI ProxyCreateDeviceAndSwapChain(IDXGIAdapter *adapter, D
     _snprintf_s(message, sizeof(message), _TRUNCATE, "D3D11CreateDeviceAndSwapChain result=0x%08lX", (ULONG)hr);
     Log(message);
     if (SUCCEEDED(hr))
+    {
         InstallObservers(device ? *device : nullptr, context ? *context : nullptr);
+        if (swap && *swap)
+            InstallSwapChainObserver(*swap);
+    }
     SetLastError(apiError);
     return hr;
 }
 #ifdef INSPECTOR_INJECTED
+HRESULT WINAPI ProxyFactory(REFIID iid, void **out)
+{
+    HRESULT hr = injectedFactory(iid, out);
+    if (SUCCEEDED(hr) && out && *out)
+        InstallFactoryObserver((IUnknown *)*out);
+    return hr;
+}
+HRESULT WINAPI ProxyFactory1(REFIID iid, void **out)
+{
+    HRESULT hr = injectedFactory1(iid, out);
+    if (SUCCEEDED(hr) && out && *out)
+        InstallFactoryObserver((IUnknown *)*out);
+    return hr;
+}
+HRESULT WINAPI ProxyFactory2(UINT flags, REFIID iid, void **out)
+{
+    HRESULT hr = injectedFactory2(flags, iid, out);
+    if (SUCCEEDED(hr) && out && *out)
+        InstallFactoryObserver((IUnknown *)*out);
+    return hr;
+}
 // Invoked by the launcher outside the loader lock, before resuming the entry thread.
 extern "C" __declspec(dllexport) DWORD WINAPI InspectorInitialize(LPVOID)
 {
@@ -174,6 +205,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI InspectorInitialize(LPVOID)
     injectedCreate = (decltype(injectedCreate))GetProcAddress(realModule, "D3D11CreateDevice");
     injectedSwap = (decltype(injectedSwap))GetProcAddress(realModule, "D3D11CreateDeviceAndSwapChain");
     if (!injectedCreate || !injectedSwap)
+        return ERROR_PROC_NOT_FOUND;
+    HMODULE dxgi = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!dxgi)
+        return GetLastError();
+    injectedFactory = (decltype(injectedFactory))GetProcAddress(dxgi, "CreateDXGIFactory");
+    injectedFactory1 = (decltype(injectedFactory1))GetProcAddress(dxgi, "CreateDXGIFactory1");
+    injectedFactory2 = (decltype(injectedFactory2))GetProcAddress(dxgi, "CreateDXGIFactory2");
+    if (!injectedFactory || !injectedFactory1 || !injectedFactory2)
         return ERROR_PROC_NOT_FOUND;
     HMODULE pinned = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
@@ -226,6 +265,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI InspectorInitialize(LPVOID)
         error = DetourAttach(&(PVOID &)injectedCreate, ProxyCreateDevice);
     if (error == NO_ERROR)
         error = DetourAttach(&(PVOID &)injectedSwap, ProxyCreateDeviceAndSwapChain);
+    if (error == NO_ERROR)
+        error = DetourAttach(&(PVOID &)injectedFactory, ProxyFactory);
+    if (error == NO_ERROR && injectedFactory1 != injectedFactory)
+        error = DetourAttach(&(PVOID &)injectedFactory1, ProxyFactory1);
+    if (error == NO_ERROR)
+        error = DetourAttach(&(PVOID &)injectedFactory2, ProxyFactory2);
     if (error == NO_ERROR)
         error = DetourTransactionCommit();
     else

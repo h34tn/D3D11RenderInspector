@@ -12,6 +12,7 @@ from generate_exports import pe_exports
 from inspector import analyze, disassemble, read_capture, sha256
 from state_args_checks import validate_state_args
 from readback_checks import validate_readback
+from sequence_checks import validate_sequence
 
 
 def main():
@@ -86,6 +87,15 @@ def main():
             assert len(sessions) == 1, sessions
             validate_state_args(sessions[0])
             report['state_args_sessions'][driver] = str(sessions[0])
+        report['sequence_sessions'] = {}
+        for driver in ['hardware', 'warp']:
+            for variant in ['legacy', 'factory2']:
+                name = 'sequence_' + driver + '_' + variant
+                run(name, [str(ROOT/'build/sequence_smoke.exe'), str(proxy), driver, variant],
+                    dict(os.environ, D3D11_PROXY_OUTPUT=str(output/name), D3D11_PROXY_MODE='observe'))
+                session = next((output/name).glob('pid_*'))
+                validate_sequence(session, variant == 'factory2')
+                report['sequence_sessions'][name] = str(session)
         report['readback_sessions'] = {}
         for driver in ['hardware', 'warp']:
             readback_root = output / ('readback_' + driver)

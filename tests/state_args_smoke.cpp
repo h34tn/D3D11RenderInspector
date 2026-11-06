@@ -235,7 +235,7 @@ int wmain(int argc, wchar_t **argv)
         FILE *request = nullptr;
         Expect(_wfopen_s(&request, (InspectorSessionDirectory() + L"\\capture.request").c_str(), L"wt") == 0,
                "create capture request");
-        fputs("14", request);
+        fputs("14\nconstants=1\nbuffers=1\n", request);
         fclose(request);
         Sleep(600);
         auto prepare = [&](UINT first, UINT instance, bool instanced, ID3D11DepthStencilView *dsv,

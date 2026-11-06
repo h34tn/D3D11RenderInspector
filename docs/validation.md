@@ -115,3 +115,23 @@ GUI 现已遵循安装清单中的自定义 DLL 名称，并能识别本次启�
 重新执行 `build.cmd`、`build_injected.cmd`、`python tests/run_tests.py` 和 `python tests/run_startup_tests.py`，均退出 0。[代理结果](../test-results/20261105_111622/result.json)与[启动注入结果](../test-results/startup_20261105_111622/result.json)均为 `passed: true`，各含硬件驱动和 WARP 的参数/深度与读回用例；40 项 Python 回归通过。逐项核对正常子命令退出 0、负向拒绝用例按预期退出 3，以及结果中的二进制哈希与当前构建一致。未重新接入目标游戏。
 
 代理 DLL SHA-256：`b96373f737e1cf0e803a5d60cf72b8654244c7dfc5b5dafacf7c216d12d82d74`；`inspector_hook.dll`：`6a080272319735c270efa492857b91730e3b6e859a8167ef0e5ea68997917d6f`；`startup_launcher.exe`：`9e95240159ea7a393ca79a70e419d0fbd86857774bbc65a6734944ecf20b577b`。
+
+## 版本 5：Buffer SRV、Present 区间与原神站姿对照（2026-11-05）
+
+新增 VS/PS/CS Structured/Raw/Typed Buffer SRV 的视图范围读回、资源 stride/flags/name、Present/Present1 入口序号与 CPU QPC、按呈现入口数结束、只记录匹配 Shader 的调用。每次缓冲读回默认 64 KiB，可配置到 4 MiB，唯一缓冲载荷每次采样上限 256 MiB。可选常量读回还解码间接 Draw/Dispatch 的实际参数，保留负 base vertex。Present TEST 与同线程嵌套入口不计数；区间首尾可能不完整，呈现入口不保证显示成功，不是 GPU 时间测量或完整帧重放。
+
+`build.cmd`、`build_injected.cmd` 退出 0；[目录代理测试](../test-results/20261105_163140/result.json)与[启动接入测试](../test-results/startup_20261105_163140/result.json)均为 `passed: true`。41 项 Python 回归通过。硬件驱动/WARP、两种接入路径、legacy Present 与 Factory2/Present1 共 8 组序列测试，逐像素/计算输出验证真实 GPU 使用的 SRV 数据，并逐字节核对视图偏移、跨区间同资源不同载荷、超过 64 KiB 的完整视图、过滤和 TEST 排除。已有参数/深度用例增加间接参数实际载荷、负 base vertex、非零缓冲偏移与报告解码检查。
+
+本轮二进制：
+
+- `d3d11.dll`：`d9c735a91c80696b147ed720d4d7e4b2fb71d088119561ba63e95f6e2a5a3b3c`
+- `inspector_hook.dll`：`c51eade8494102256d3760342c13c1d608955f56b455e8631d19e81b278489d7`
+- `startup_launcher.exe`：`d75bf18da701bc62112e6bd1c753bbe39575c25f3a144179ecc7135a5b9acbbb`
+
+在用户指定原神 7.2.0 中以启动接入运行。第一轮 PID 55028 取得完整调用与呈现入口记录，发现主角池化顶点缓冲为 2,198,736 字节，原默认读回截断，因而补齐较大范围及间接参数后正常关闭并重启一次。最终 PID 75596 的 `capture_1`（用户设置高低脚）为 112 个角色相关调用、3 个 Present 入口；`capture_2`（用户设置平地）为 127 个调用、3 个 Present 入口；`capture_3` 为 6 个计算调用、3 个 Present 入口，实际读回 9 个 Buffer SRV 载荷。三组均以 `present_limit` 完整结束，无读回错误或截断。游戏 EXE 哈希与此前静态分析一致，未部署同目录 DLL 或改写游戏二进制。
+
+高低脚 event 1 的间接参数为 77,478 indices、1 instance、start_index 35,496、base_vertex 0。依据实际索引、完整顶点流及 Shader 使用的 CB2 模型矩阵，重建 18,921 个独立顶点的可辨认角色身体网格。绘制索引数可动态变化，辅助 UV 流保持相同字节内容；对两种姿态各三个区间均引用的固定顶点进行几何区域比较。下腿/鞋部区域通过参考网格局部截面、三角连通关系与重合点焊接选取，区域 A/B 为 877/459 个顶点，未标为具名骨骼。
+
+候选鞋部最低点的世界 Y 高差：高低脚 `0.208754..0.208883`，平地 `0.011436..0.011519` 个世界单位；5% 分位数的差异分别约 `0.2031..0.2032` 和 `0.00236..0.00245`。未标定现实米制比例。此结果支持地形站姿适配已作用于送往 VS 的网格；没有 CPU IK 函数命中、具名骨骼、输入目标、权重或 IK 开关 A/B，不能确认具体求解器，不能据此量化骨盆补偿、锁脚释放或游戏性能。
+
+原始采样位于 `captures/genshin-ik-v5/`；详细方法、哈希、逐事件数值、图与复现脚本在忽略目录中保留：[汇总收据](../test-results/genshin-ik/result.json)、[分析报告](../test-results/genshin-ik/report.txt)、[网格对照图](../test-results/genshin-ik/stance-comparison.png)、[几何数值与方法](../test-results/genshin-ik/stance-comparison.json)。原始游戏资源与采样不纳入版本控制。

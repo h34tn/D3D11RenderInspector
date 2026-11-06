@@ -103,19 +103,28 @@ def write_json(path, value):
     Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf8')
 
 
-def capture(session, count, constants=False, textures=False, filters=()):
+def capture(session, count, constants=False, textures=False, filters=(), buffers=False, frames=0, only_matching=False,
+            buffer_limit=65536):
     session = session.resolve(strict=True)
     if not session.is_dir() or not (session/'proxy.log').is_file():
         raise ValueError('Choose a session directory containing proxy.log')
     request = session/'capture.request'
     if request.exists(): raise ValueError('A capture request is already pending')
     if not 1 <= count <= 10000: raise ValueError('Event count must be 1..10000')
+    if not 0 <= frames <= 600: raise ValueError('Present interval count must be 0..600')
+    if not 65536 <= buffer_limit <= 4194304: raise ValueError('Buffer limit must be 65536..4194304 bytes')
     filters = [f for f in filters if f]
     if any(c in f for f in filters for c in '|\r\n') or not all(f.isprintable() and f.isascii() for f in filters):
         raise ValueError('Filters are printable ASCII debug-name substrings without | or line breaks')
+    if only_matching and (not filters or not frames):
+        raise ValueError('Only-matching capture requires a filter and a finite --frames limit')
     text = str(count)
     if constants: text += '\nconstants=1'
     if textures: text += '\ntextures=1'
+    if buffers: text += '\nbuffers=1'
+    if buffer_limit != 65536: text += f'\nbuffer_limit={buffer_limit}'
+    if frames: text += f'\nframes={frames}'
+    if only_matching: text += '\nonly_matching=1'
     if filters: text += '\nfilter=' + '|'.join(filters)
     fd, temporary = tempfile.mkstemp(prefix='request-', suffix='.tmp', dir=session)
     try:
@@ -125,6 +134,8 @@ def capture(session, count, constants=False, textures=False, filters=()):
     finally:
         if os.path.exists(temporary): os.unlink(temporary)
     extra = ', '.join(x for x in ['constants' if constants else '', 'textures' if textures else '',
+                                  'buffers' if buffers else '', f'presents={frames}' if frames else '',
+                                  'only_matching' if only_matching else '',
                                   ('filter=' + '|'.join(filters)) if filters else ''] if x)
     print(f'Requested {count} events{" (" + extra + ")" if extra else ""}: {request}')
     print('Consumption starts on the next observed draw/dispatch; an end record confirms completion.')
@@ -161,7 +172,9 @@ def call_args(event):
     if not isinstance(args, dict):
         return ''
     if 'buffer' in args:
-        return f"间接参数缓冲 {(args['buffer'] or {}).get('id', '?')} @ {args.get('offset', '?')}（内容未读回）"
+        resolved = (event.get('indirect_arguments') or {}).get('resolved')
+        suffix = ', '.join(f'{k}={v}' for k,v in resolved.items()) if resolved is not None else '内容未读回'
+        return f"间接参数缓冲 {(args['buffer'] or {}).get('id', '?')} @ {args.get('offset', '?')}（{suffix}）"
     return ', '.join(f'{key}={value}' for key, value in args.items())
 
 
@@ -262,7 +275,9 @@ def readback_column(event):
         if 'data' in item: parts.append(f"vb{item['slot']} stride {item['stride']} · {item['data_bytes']} B")
     for key, label in [('vs_inputs', 'VS t'), ('inputs', 't')]:
         for item in event.get(key, []):
-            if 'dump' in item: parts.append(f"{label}{item['slot']} {Path(item['dump']).name}")
+            if 'data' in item: parts.append(f"{label}{item['slot']} {item['data_bytes']} B · {Path(item['data']).name}")
+            elif 'data_error' in item: parts.append(f"{label}{item['slot']} 读回失败 {item['data_error']}")
+            elif 'dump' in item: parts.append(f"{label}{item['slot']} {Path(item['dump']).name}")
             elif 'dump_skipped' in item: parts.append(f"{label}{item['slot']} 跳过 {item['dump_skipped']}")
     return '; '.join(parts)
 
@@ -274,16 +289,21 @@ def analyze(session):
     previews = [dds_to_png(p) for p in sorted(session.glob('capture_*_data/tex_*.dds'))]
     for path in sorted(session.glob('capture_*.jsonl')):
         events, complete, errors = read_capture(path)
+        markers = [r for line in path.read_text(encoding='utf8', errors='replace').splitlines()
+                   if line.strip() for r in [json.loads(line)] if r.get('type') == 'present'] if not errors else []
         summary = {'file': path.name, 'complete': complete, 'events': len(events), 'parse_errors': errors,
                    'calls': dict(Counter(e['call'] for e in events)),
                    'shader_names': dict(Counter(e.get('shader_name') or e.get('shader_file','unknown') for e in events)),
-                   'context_types': dict(Counter(str(e.get('context_type')) for e in events))}
+                   'context_types': dict(Counter(str(e.get('context_type')) for e in events)),
+                   'present_markers': len(markers),
+                   'swap_chains': sorted({r['swap_chain'] for r in markers}),
+                   'present_sequences': sorted({e['present_seq'] for e in events if 'present_seq' in e})}
         summaries.append(summary)
         write_json(path.with_suffix('.summary.json'), summary)
-        lines = ['event\tcall\targs\tshader_files\tshader_name\tinputs\toutputs\tdepth\treadback']
+        lines = ['event\tpresent_seq\tqpc\tcall\targs\tshader_files\tshader_name\tinputs\toutputs\tdepth\treadback']
         table = []
         for e in events:
-            columns = [str(e['event']), e['call'], call_args(e), shaders_column(e), e.get('shader_name',''),
+            columns = [str(e['event']), str(e.get('present_seq', '')), str(e.get('qpc', '')), e['call'], call_args(e), shaders_column(e), e.get('shader_name',''),
                        views(e.get('inputs',[])), views(e.get('outputs',[])), depth(e), readback_column(e)]
             lines.append('\t'.join(s.replace('\t',' ').replace('\n',' ') for s in columns))
             table.append('<tr>'+''.join('<td>'+html.escape(s)+'</td>' for s in columns)+'</tr>')
@@ -292,8 +312,8 @@ def analyze(session):
         report = f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>{title}</title>
 <style>body{{font:14px/1.6 system-ui;background:#0d1421;color:#d9e5f6;margin:32px}}h1{{color:#81d4fc}}.note{{padding:16px;background:#18243a;border-left:4px solid #81d4fc}}table{{border-collapse:collapse;width:100%;margin-top:24px}}th,td{{text-align:left;padding:10px;border-bottom:1px solid #29354b;vertical-align:top;overflow-wrap:anywhere}}th{{background:#18243a;position:sticky;top:0}}tr:hover{{background:#17233a}}td:first-child{{color:#81d4fc}}</style>
 <h1>D3D11 调用与资源绑定 · {title}</h1><div class="note">完整：{complete} · 调用数：{len(events)}<br>
-这是按调用顺序记录的立即上下文状态快照，包含 Draw / Dispatch 的调用参数、绑定关系与深度状态；请求开启读回时，匹配调用的常量/顶点缓冲与输入纹理 mip 0 存在 capture_N_data/。没有 Present 帧边界、GPU 耗时或间接参数缓冲内容；不可据此直接判断一帧开销或重放。资源地址仅作本次采样中的关联线索。</div>
-<table><thead><tr><th>事件</th><th>调用</th><th>调用参数</th><th>字节码（VS / PS·CS）</th><th>调试名称</th><th>输入资源</th><th>输出资源</th><th>深度</th><th>读回</th></tr></thead><tbody>{''.join(table)}</tbody></table></html>'''
+这是按调用顺序记录的立即上下文状态快照。Present 入口标记：{len(markers)}；present_seq 仅划分已观察的呈现入口区间，首尾可能不完整，多交换链须分别核对，不代表完整帧。读回数据保存在 capture_N_data/。QPC 是受采样影响的 CPU 时间，不是 GPU 耗时。不能直接重放或从最终蒙皮数据确认 IK 求解器。资源地址仅作本次采样中的关联线索。</div>
+<table><thead><tr><th>事件</th><th>Present 序号</th><th>CPU QPC</th><th>调用</th><th>调用参数</th><th>字节码（VS / PS·CS）</th><th>调试名称</th><th>输入资源</th><th>输出资源</th><th>深度</th><th>读回</th></tr></thead><tbody>{''.join(table)}</tbody></table></html>'''
         path.with_suffix('.html').write_text(report, encoding='utf8')
     write_json(session/'analysis.json', {'captures': summaries, 'shaders': shader_index,
                                          'png_previews': sum(1 for p in previews if p)})
@@ -387,6 +407,10 @@ def main():
     request.add_argument('--events', type=int, default=2000)
     request.add_argument('--constants', action='store_true', help='Read back constant, vertex and index buffers')
     request.add_argument('--textures', action='store_true', help='Dump mip 0 of VS/PS/CS input 2D textures as DDS')
+    request.add_argument('--buffers', action='store_true', help='Read VS/PS/CS structured, raw and supported typed buffer SRV ranges')
+    request.add_argument('--buffer-limit', type=int, default=65536, help='Per-buffer readback limit in bytes, 65536..4194304 (default 65536)')
+    request.add_argument('--frames', type=int, default=0, help='Stop after 1..600 observed non-test Present entries (event cap still applies)')
+    request.add_argument('--only-matching', action='store_true', help='Record only matching shader names; requires --filter and --frames')
     request.add_argument('--filter', action='append', default=[],
                          help='Debug-name substring (repeatable); readback only for matching PS/CS or VS')
     constants = commands.add_parser('constants', help='Print a read-back constant buffer as float4 rows')
@@ -427,7 +451,8 @@ def main():
         for path in sorted(args.output.glob('pid_*'), key=lambda p:p.stat().st_mtime, reverse=True):
             print(f'{path}  captures={len(list(path.glob("capture_*.jsonl")))}')
     elif args.command == 'capture':
-        capture(args.session, args.events, args.constants, args.textures, args.filter)
+        capture(args.session, args.events, args.constants, args.textures, args.filter, args.buffers, args.frames,
+                args.only_matching, args.buffer_limit)
     elif args.command == 'constants': print_constants(args.capture, args.event, args.stage, args.slot)
     elif args.command == 'analyze': analyze(args.session)
     elif args.command == 'disassemble': disassemble(args.session.resolve(strict=True))

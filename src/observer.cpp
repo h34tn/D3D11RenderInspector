@@ -4,8 +4,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <initializer_list>
 #include <d3d11_4.h>
+#include <dxgi1_6.h>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -37,7 +38,11 @@ unsigned shaderCount = 0, captureCount = 0, eventCount = 0;
 FILE *trace = nullptr;
 // Optional readback, enabled per request and only while a bounded capture is active. Reads are ordered copies
 // on the immediate context followed by a blocking Map, so they show the state at that point in the command stream.
-bool readConstants = false, readTextures = false;
+bool readConstants = false, readTextures = false, readBuffers = false, onlyMatching = false;
+unsigned requestedFrames = 0, capturedPresents = 0;
+unsigned long long presentSequence = 0, savedBufferBytes = 0;
+std::atomic<bool> presentTracking{false};
+thread_local bool insidePresent = false;
 std::vector<std::string> nameFilters;
 std::wstring dataDirectory;
 std::string dataPrefix;
@@ -45,7 +50,11 @@ std::unordered_set<unsigned long long> savedBlobs;
 std::unordered_map<void *, std::string> savedTextures;
 unsigned long long savedTextureBytes = 0;
 ID3D11Buffer *bufferStaging = nullptr;
+ID3D11Device *bufferStagingDevice = nullptr; // Owned indirectly by bufferStaging.
+ULONGLONG captureStartedTick = 0;
 constexpr UINT kBufferReadLimit = 65536;
+UINT bufferReadLimit = kBufferReadLimit;
+constexpr unsigned long long kBufferCaptureLimit = 256ull << 20;
 constexpr unsigned long long kTextureFileLimit = 64ull << 20, kTextureCaptureLimit = 1ull << 30;
 constexpr size_t kTextureCountLimit = 1024;
 std::string Ptr(void *p)
@@ -140,10 +149,15 @@ std::string Resource(ID3D11Resource *r)
         {
             D3D11_BUFFER_DESC d;
             b->GetDesc(&d);
-            s << ",\"bytes\":" << d.ByteWidth;
+            s << ",\"bytes\":" << d.ByteWidth << ",\"structure_stride\":" << d.StructureByteStride
+              << ",\"bind_flags\":" << d.BindFlags << ",\"misc_flags\":" << d.MiscFlags;
             b->Release();
         }
     }
+    char debugName[1024] = {};
+    UINT debugSize = sizeof(debugName) - 1;
+    if (SUCCEEDED(r->GetPrivateData(WKPDID_D3DDebugObjectName, &debugSize, debugName)))
+        s << ",\"name\":\"" << Escape(std::string(debugName, debugSize)) << "\"";
     s << "}";
     return s.str();
 }
@@ -165,7 +179,7 @@ void StartCapture()
         return;
     FILE *f = nullptr;
     unsigned n = 2000;
-    // Line 1: event count. Optional lines: constants=1, textures=1, filter=Name|Other (debug-name substrings).
+    // Line 1: event cap. Optional readback, buffer_limit, frames, only_matching and filter=Name|Other lines.
     std::string request;
     if (_wfopen_s(&f, requestPath.c_str(), L"rb") == 0)
     {
@@ -179,6 +193,23 @@ void StartCapture()
     n = n < 1 ? 1 : (n > 10000 ? 10000 : n);
     readConstants = request.find("\nconstants=1") != std::string::npos;
     readTextures = request.find("\ntextures=1") != std::string::npos;
+    readBuffers = request.find("\nbuffers=1") != std::string::npos;
+    bufferReadLimit = kBufferReadLimit;
+    auto limitAt = request.find("\nbuffer_limit=");
+    if (limitAt != std::string::npos)
+        sscanf_s(request.c_str() + limitAt + 14, "%u", &bufferReadLimit);
+    if (bufferReadLimit < kBufferReadLimit)
+        bufferReadLimit = kBufferReadLimit;
+    if (bufferReadLimit > (4u << 20))
+        bufferReadLimit = 4u << 20;
+    onlyMatching = request.find("\nonly_matching=1") != std::string::npos;
+    requestedFrames = 0;
+    auto frameAt = request.find("\nframes=");
+    if (frameAt != std::string::npos)
+        sscanf_s(request.c_str() + frameAt + 8, "%u", &requestedFrames);
+    if (requestedFrames > 600)
+        requestedFrames = 600;
+    capturedPresents = 0;
     nameFilters.clear();
     auto at = request.find("\nfilter=");
     if (at != std::string::npos)
@@ -206,9 +237,10 @@ void StartCapture()
     savedBlobs.clear();
     savedTextures.clear();
     savedTextureBytes = 0;
+    savedBufferBytes = 0;
     dataDirectory.clear();
     dataPrefix.clear();
-    if (readConstants || readTextures)
+    if (readConstants || readTextures || readBuffers)
     {
         char folder[64];
         sprintf_s(folder, "capture_%u_data", captureCount);
@@ -217,21 +249,28 @@ void StartCapture()
         CreateDirectoryW(dataDirectory.c_str(), nullptr);
     }
     std::ostringstream header;
-    header << "{\"type\":\"header\",\"version\":4,\"scope\":\"bounded immediate-context state snapshots, no "
-              "Present/frame boundary; optional constant/vertex buffer and texture mip-0 readback for matching "
-              "events only; indirect argument buffer contents not captured\",\"options\":{\"constants\":"
-           << (int)readConstants << ",\"textures\":" << (int)readTextures << ",\"filter\":[";
+    header << "{\"type\":\"header\",\"version\":5,\"scope\":\"bounded immediate-context snapshots with observed "
+              "Present/Present1 entry markers; first/last intervals may be partial; multiple swapchains are "
+              "explicit, not a full-frame replay or GPU timing; optional indirect argument "
+              "readback\",\"options\":{\"constants\":"
+           << (int)readConstants << ",\"textures\":" << (int)readTextures << ",\"buffers\":" << (int)readBuffers
+           << ",\"buffer_limit\":" << bufferReadLimit << ",\"frames\":" << requestedFrames
+           << ",\"only_matching\":" << (int)onlyMatching << ",\"filter\":[";
     for (size_t i = 0; i < nameFilters.size(); i++)
         header << (i ? "," : "") << "\"" << Escape(nameFilters[i]) << "\"";
-    header << "],\"data\":\"" << dataPrefix << "\"},\"pid\":" << GetCurrentProcessId() << "}\n";
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    header << "],\"data\":\"" << dataPrefix << "\"},\"qpc_frequency\":" << frequency.QuadPart
+           << ",\"pid\":" << GetCurrentProcessId() << "}\n";
     auto text = header.str();
     fwrite(text.data(), 1, text.size(), trace);
     eventCount = 0;
+    captureStartedTick = GetTickCount64();
     remaining = n;
     ObserverInfo("observer bounded capture started");
 }
 // Raw call parameters, kept on the stack for every call; formatted only while a capture is active.
-// Indirect calls only identify the argument buffer; its contents are not read back.
+// Indirect identities are always recorded; matching --constants readback also decodes the argument payload.
 struct CallArgs
 {
     const char *names[5] = {};
@@ -310,8 +349,9 @@ bool WriteData(const std::string &file, const void *head, size_t headSize, const
     fclose(f);
     return ok;
 }
-// Copies [offset, offset+limit) of a buffer (clamped to its size and 64 KiB) into a content-addressed blob.
-std::string ReadBuffer(ID3D11DeviceContext *c, ID3D11Buffer *b, UINT offset, UINT limit)
+// Copies a buffer range, clamped to its size and the per-request byte cap, into a content-addressed blob.
+std::string ReadBuffer(ID3D11DeviceContext *c, ID3D11Buffer *b, UINT offset, UINT limit,
+                       std::vector<unsigned char> *copied = nullptr)
 {
     D3D11_BUFFER_DESC desc;
     b->GetDesc(&desc);
@@ -320,44 +360,93 @@ std::string ReadBuffer(ID3D11DeviceContext *c, ID3D11Buffer *b, UINT offset, UIN
     UINT size = desc.ByteWidth - offset;
     if (limit && limit < size)
         size = limit;
-    bool truncated = size > kBufferReadLimit;
+    bool truncated = size > bufferReadLimit;
     if (truncated)
-        size = kBufferReadLimit;
+        size = bufferReadLimit;
+    ID3D11Device *sourceDevice = nullptr;
+    c->GetDevice(&sourceDevice);
+    if (bufferStaging && bufferStagingDevice != sourceDevice)
+    {
+        bufferStaging->Release();
+        bufferStaging = nullptr;
+        bufferStagingDevice = nullptr;
+    }
     if (!bufferStaging)
     {
-        ID3D11Device *d = nullptr;
-        c->GetDevice(&d);
         D3D11_BUFFER_DESC s = {};
-        s.ByteWidth = kBufferReadLimit;
+        s.ByteWidth = bufferReadLimit;
         s.Usage = D3D11_USAGE_STAGING;
         s.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        HRESULT hr = d ? d->CreateBuffer(&s, nullptr, &bufferStaging) : E_FAIL;
-        if (d)
-            d->Release();
+        HRESULT hr = sourceDevice ? sourceDevice->CreateBuffer(&s, nullptr, &bufferStaging) : E_FAIL;
         if (FAILED(hr))
+        {
+            if (sourceDevice)
+                sourceDevice->Release();
             return ",\"data_error\":\"staging buffer\"";
+        }
+        bufferStagingDevice = sourceDevice;
     }
+    if (sourceDevice)
+        sourceDevice->Release();
     D3D11_BOX box = {offset, 0, 0, offset + size, 1, 1};
     c->CopySubresourceRegion(bufferStaging, 0, 0, 0, 0, b, 0, &box);
     D3D11_MAPPED_SUBRESOURCE m = {};
     if (FAILED(c->Map(bufferStaging, 0, D3D11_MAP_READ, 0, &m)))
         return ",\"data_error\":\"map\"";
     auto hash = Fnv(m.pData, size);
+    if (copied)
+        copied->assign((const unsigned char *)m.pData, (const unsigned char *)m.pData + size);
     char file[48];
     sprintf_s(file, "buf_%016llx.bin", hash);
-    bool ok = true;
-    if (savedBlobs.insert(hash).second && !WriteData(file, nullptr, 0, m.pData, size))
+    bool ok = true, overLimit = false;
+    if (savedBlobs.insert(hash).second)
     {
-        savedBlobs.erase(hash);
-        ok = false;
+        overLimit = savedBufferBytes + size > kBufferCaptureLimit;
+        ok = !overLimit && WriteData(file, nullptr, 0, m.pData, size);
+        if (ok)
+            savedBufferBytes += size;
+        else
+            savedBlobs.erase(hash);
     }
     c->Unmap(bufferStaging, 0);
     if (!ok)
-        return ",\"data_error\":\"write\"";
+        return overLimit ? ",\"data_error\":\"capture byte limit\"" : ",\"data_error\":\"write\"";
     std::ostringstream s;
     s << ",\"data\":\"" << dataPrefix << file << "\",\"data_offset\":" << offset << ",\"data_bytes\":" << size;
     if (truncated)
         s << ",\"data_truncated\":1";
+    return s.str();
+}
+std::string IndirectArguments(ID3D11DeviceContext *c, const char *kind, const CallArgs &args)
+{
+    bool dispatch = strcmp(kind, "DispatchIndirect") == 0;
+    bool indexed = strcmp(kind, "DrawIndexedInstancedIndirect") == 0;
+    UINT size = dispatch ? 12 : indexed ? 20 : 16;
+    std::vector<unsigned char> copied;
+    std::ostringstream s;
+    s << ",\"indirect_arguments\":{\"offset\":" << args.offset
+      << ReadBuffer(c, args.indirect, args.offset, size, &copied);
+    if (copied.size() == size)
+    {
+        UINT values[5] = {};
+        memcpy(values, copied.data(), size);
+        if (dispatch)
+            s << ",\"resolved\":{\"x\":" << values[0] << ",\"y\":" << values[1] << ",\"z\":" << values[2] << "}";
+        else
+        {
+            s << ",\"resolved\":{\"" << (indexed ? "index_count" : "vertex_count") << "\":" << values[0]
+              << ",\"instance_count\":" << values[1] << ",\"" << (indexed ? "start_index" : "start_vertex")
+              << "\":" << values[2];
+            if (indexed)
+            {
+                INT base;
+                memcpy(&base, &values[3], sizeof(base));
+                s << ",\"base_vertex\":" << base;
+            }
+            s << ",\"start_instance\":" << values[indexed ? 4 : 3] << "}";
+        }
+    }
+    s << "}";
     return s.str();
 }
 // Bytes per pixel, or per 4x4 block when *block is set; 0 for formats the dump does not lay out.
@@ -512,7 +601,7 @@ enum class Stage
     Pixel,
     Compute
 };
-std::string ShaderInputs(ID3D11DeviceContext *c, Stage stage, bool dump)
+std::string ShaderInputs(ID3D11DeviceContext *c, Stage stage, bool dump, bool buffers)
 {
     ID3D11ShaderResourceView *input[128] = {};
     if (stage == Stage::Compute)
@@ -530,9 +619,45 @@ std::string ShaderInputs(ID3D11DeviceContext *c, Stage stage, bool dump)
             D3D11_SHADER_RESOURCE_VIEW_DESC d;
             input[i]->GetDesc(&d);
             s << (sep ? "," : "") << "{\"slot\":" << i << ",\"view_format\":" << (int)d.Format
-              << ",\"resource\":" << View(input[i]);
+              << ",\"view_dimension\":" << (int)d.ViewDimension << ",\"resource\":" << View(input[i]);
             sep = true;
-            if (dump)
+            if (d.ViewDimension == D3D11_SRV_DIMENSION_BUFFER || d.ViewDimension == D3D11_SRV_DIMENSION_BUFFEREX)
+            {
+                bool raw =
+                    d.ViewDimension == D3D11_SRV_DIMENSION_BUFFEREX && (d.BufferEx.Flags & D3D11_BUFFEREX_SRV_FLAG_RAW);
+                UINT first =
+                    d.ViewDimension == D3D11_SRV_DIMENSION_BUFFEREX ? d.BufferEx.FirstElement : d.Buffer.FirstElement;
+                UINT count =
+                    d.ViewDimension == D3D11_SRV_DIMENSION_BUFFEREX ? d.BufferEx.NumElements : d.Buffer.NumElements;
+                s << ",\"first_element\":" << first << ",\"num_elements\":" << count << ",\"raw\":" << (int)raw;
+                ID3D11Resource *r = nullptr;
+                ID3D11Buffer *b = nullptr;
+                input[i]->GetResource(&r);
+                if (r && SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Buffer), (void **)&b)))
+                {
+                    D3D11_BUFFER_DESC bd;
+                    b->GetDesc(&bd);
+                    bool block = false;
+                    UINT stride = raw ? 4
+                                  : (bd.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)
+                                      ? bd.StructureByteStride
+                                      : FormatBytes(d.Format, &block);
+                    s << ",\"element_bytes\":" << stride;
+                    if (buffers)
+                    {
+                        unsigned long long offset = (unsigned long long)first * stride;
+                        unsigned long long size = (unsigned long long)count * stride;
+                        if (!stride || block || !size || offset >= bd.ByteWidth || size > bd.ByteWidth - offset)
+                            s << ",\"data_error\":\"unsupported or invalid SRV range\"";
+                        else
+                            s << ReadBuffer(c, b, (UINT)offset, (UINT)size);
+                    }
+                    b->Release();
+                }
+                if (r)
+                    r->Release();
+            }
+            else if (dump)
             {
                 ID3D11Resource *r = nullptr;
                 input[i]->GetResource(&r);
@@ -626,11 +751,25 @@ std::string VertexBuffers(ID3D11DeviceContext *c, bool read)
         s << "null";
     return s.str();
 }
-void Record(ID3D11DeviceContext *c, const char *kind, const CallArgs &args, bool compute = false)
+void EndCapture(const char *reason)
 {
-    // Deferred contexts cannot provide reliable Get* binding snapshots.
-    if (c->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
-        return;
+    fprintf(trace, "{\"type\":\"end\",\"events\":%u,\"presents\":%u,\"reason\":\"%s\"}\n", eventCount, capturedPresents,
+            reason);
+    fclose(trace);
+    trace = nullptr;
+    remaining = 0;
+    if (bufferStaging)
+    {
+        bufferStaging->Release();
+        bufferStaging = nullptr;
+        bufferStagingDevice = nullptr;
+    }
+    readConstants = readTextures = readBuffers = false;
+    savedTextures.clear();
+    ObserverInfo("observer bounded capture completed");
+}
+void PollCapture()
+{
     if (!remaining.load(std::memory_order_relaxed))
     {
         ULONGLONG now = GetTickCount64(), old = nextPoll.load();
@@ -639,16 +778,23 @@ void Record(ID3D11DeviceContext *c, const char *kind, const CallArgs &args, bool
         std::lock_guard<std::mutex> g(recordMutex);
         if (!remaining)
             StartCapture();
-        if (!remaining)
-            return;
     }
+}
+void Record(ID3D11DeviceContext *c, const char *kind, const CallArgs &args, bool compute = false)
+{
+    // Deferred contexts cannot provide reliable Get* binding snapshots.
+    if (c->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
+        return;
+    PollCapture();
     std::lock_guard<std::mutex> g(recordMutex);
     if (!remaining || !trace)
         return;
+    if (requestedFrames && GetTickCount64() - captureStartedTick > 120000)
+    {
+        EndCapture("timeout");
+        return;
+    }
     std::ostringstream s;
-    s << "{\"event\":" << ++eventCount << ",\"tick\":" << GetTickCount64() << ",\"thread\":" << GetCurrentThreadId()
-      << ",\"context\":\"" << Ptr(c) << "\",\"context_type\":" << (int)c->GetType() << ",\"call\":\"" << kind << "\""
-      << ",\"args\":" << FormatArgs(args);
     ID3D11DeviceChild *shader = nullptr, *vertex = nullptr;
     if (compute)
     {
@@ -666,6 +812,21 @@ void Record(ID3D11DeviceContext *c, const char *kind, const CallArgs &args, bool
         vertex = v;
     }
     auto shaderName = ShaderName(shader), vertexName = ShaderName(vertex);
+    bool filterMatch = MatchesFilter(shaderName, vertexName);
+    if (onlyMatching && !filterMatch)
+    {
+        if (shader)
+            shader->Release();
+        if (vertex)
+            vertex->Release();
+        return;
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    s << "{\"event\":" << ++eventCount << ",\"tick\":" << GetTickCount64() << ",\"qpc\":" << now.QuadPart
+      << ",\"present_seq\":" << presentSequence << ",\"present_tracking\":" << (int)presentTracking.load()
+      << ",\"thread\":" << GetCurrentThreadId() << ",\"context\":\"" << Ptr(c)
+      << "\",\"context_type\":" << (int)c->GetType() << ",\"call\":\"" << kind << "\",\"args\":" << FormatArgs(args);
     s << ShaderFields("", shader, shaderName);
     if (!compute)
     {
@@ -690,13 +851,16 @@ void Record(ID3D11DeviceContext *c, const char *kind, const CallArgs &args, bool
         shader->Release();
     if (vertex)
         vertex->Release();
-    bool matched = (readConstants || readTextures) && MatchesFilter(shaderName, vertexName);
+    bool matched = (readConstants || readTextures || readBuffers) && filterMatch;
     if (matched)
         s << ",\"readback\":1";
-    s << ",\"inputs\":" << ShaderInputs(c, compute ? Stage::Compute : Stage::Pixel, matched && readTextures);
+    if (matched && readConstants && args.indirect)
+        s << IndirectArguments(c, kind, args);
+    s << ",\"inputs\":"
+      << ShaderInputs(c, compute ? Stage::Compute : Stage::Pixel, matched && readTextures, matched && readBuffers);
     if (!compute)
     {
-        s << ",\"vs_inputs\":" << ShaderInputs(c, Stage::Vertex, matched && readTextures);
+        s << ",\"vs_inputs\":" << ShaderInputs(c, Stage::Vertex, matched && readTextures, matched && readBuffers);
         s << ",\"vertex_buffers\":" << VertexBuffers(c, matched && readConstants);
     }
     s << ",\"outputs\":[";
@@ -740,8 +904,7 @@ void Record(ID3D11DeviceContext *c, const char *kind, const CallArgs &args, bool
         {
             D3D11_DEPTH_STENCIL_VIEW_DESC d;
             z->GetDesc(&d);
-            s << "{\"view_format\":" << (int)d.Format << ",\"flags\":" << d.Flags << ",\"resource\":" << View(z)
-              << "}";
+            s << "{\"view_format\":" << (int)d.Format << ",\"flags\":" << d.Flags << ",\"resource\":" << View(z) << "}";
             z->Release();
         }
         else
@@ -779,19 +942,7 @@ void Record(ID3D11DeviceContext *c, const char *kind, const CallArgs &args, bool
     auto text = s.str();
     fwrite(text.data(), 1, text.size(), trace);
     if (--remaining == 0)
-    {
-        fprintf(trace, "{\"type\":\"end\",\"events\":%u}\n", eventCount);
-        fclose(trace);
-        trace = nullptr;
-        if (bufferStaging)
-        {
-            bufferStaging->Release();
-            bufferStaging = nullptr;
-        }
-        readConstants = readTextures = false;
-        savedTextures.clear();
-        ObserverInfo("observer bounded capture completed");
-    }
+        EndCapture("event_limit");
 }
 void STDMETHODCALLTYPE DrawIndexed(ID3D11DeviceContext *c, UINT n, UINT start, INT base)
 {
@@ -811,7 +962,8 @@ void STDMETHODCALLTYPE DrawIndexedInstanced(ID3D11DeviceContext *c, UINT a, UINT
 }
 void STDMETHODCALLTYPE DrawInstanced(ID3D11DeviceContext *c, UINT a, UINT b, UINT d, UINT e)
 {
-    Record(c, "DrawInstanced", {{"vertex_count", a}, {"instance_count", b}, {"start_vertex", d}, {"start_instance", e}});
+    Record(c, "DrawInstanced",
+           {{"vertex_count", a}, {"instance_count", b}, {"start_vertex", d}, {"start_instance", e}});
     Original<decltype(&DrawInstanced)>(c, 21)(c, a, b, d, e);
 }
 void STDMETHODCALLTYPE DrawAuto(ID3D11DeviceContext *c)
@@ -921,10 +1073,12 @@ bool InstallTable(void *obj, unsigned count, const std::vector<std::pair<unsigne
         return false;
     }
     MEMORY_BASIC_INFORMATION debugMemory = {};
-    VirtualQuery(current[37], &debugMemory, sizeof(debugMemory));
+    unsigned debugSlot = count > 37 ? 37 : count - 1;
+    VirtualQuery(current[debugSlot], &debugMemory, sizeof(debugMemory));
     char debugMessage[300];
-    sprintf_s(debugMessage, "vtable=%p slot37=%p module=%p rva=%llx", current, current[37], debugMemory.AllocationBase,
-              (unsigned long long)((char *)current[37] - (char *)debugMemory.AllocationBase));
+    sprintf_s(debugMessage, "vtable=%p slot%u=%p module=%p rva=%llx", current, debugSlot, current[debugSlot],
+              debugMemory.AllocationBase,
+              (unsigned long long)((char *)current[debugSlot] - (char *)debugMemory.AllocationBase));
     ObserverInfo(
         debugMessage); // The runtime uses private virtual methods beyond the public COM interface (GetFeatureLevel
                        // dispatches through slot 69). Preserve the contiguous executable tail.
@@ -962,6 +1116,165 @@ bool InstallTable(void *obj, unsigned count, const std::vector<std::pair<unsigne
     InterlockedExchangePointer(reinterpret_cast<PVOID volatile *>(obj), raw->shadow.get());
     return true;
 }
+// These are Present-entry markers, not successful displayed frames or GPU timestamps.
+void RecordPresent(IDXGISwapChain *swap, UINT sync, UINT flags, const char *method)
+{
+    if (flags & DXGI_PRESENT_TEST)
+        return;
+    PollCapture();
+    std::lock_guard<std::mutex> g(recordMutex);
+    ++presentSequence;
+    if (!trace || !remaining)
+        return;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    fprintf(trace,
+            "{\"type\":\"present\",\"present_seq\":%llu,\"swap_chain\":\"%s\",\"method\":\"%s\","
+            "\"sync_interval\":%u,\"flags\":%u,\"qpc\":%lld,\"thread\":%lu}\n",
+            presentSequence, Ptr(swap).c_str(), method, sync, flags, now.QuadPart, GetCurrentThreadId());
+    ++capturedPresents;
+    if (requestedFrames && capturedPresents >= requestedFrames)
+        EndCapture("present_limit");
+    else
+        fflush(trace);
+}
+HRESULT STDMETHODCALLTYPE Present(IDXGISwapChain *swap, UINT sync, UINT flags)
+{
+    bool outer = !insidePresent;
+    if (outer)
+    {
+        insidePresent = true;
+        RecordPresent(swap, sync, flags, "Present");
+    }
+    HRESULT hr = Original<decltype(&Present)>(swap, 8)(swap, sync, flags);
+    if (outer)
+        insidePresent = false;
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE Present1(IDXGISwapChain1 *swap, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS *params)
+{
+    bool outer = !insidePresent;
+    if (outer)
+    {
+        insidePresent = true;
+        RecordPresent(swap, sync, flags, "Present1");
+    }
+    HRESULT hr = Original<decltype(&Present1)>(swap, 22)(swap, sync, flags, params);
+    if (outer)
+        insidePresent = false;
+    return hr;
+}
+template <class T, class O> bool SameInterface(O *object)
+{
+    T *p = nullptr;
+    if (FAILED(object->QueryInterface(__uuidof(T), (void **)&p)))
+        return false;
+    bool same = (void *)p == (void *)object;
+    p->Release();
+    return same;
+}
+void InstallSwapChainObject(IDXGISwapChain *swap)
+{
+    UINT count = SameInterface<IDXGISwapChain4>(swap)   ? 41
+                 : SameInterface<IDXGISwapChain3>(swap) ? 40
+                 : SameInterface<IDXGISwapChain2>(swap) ? 36
+                 : SameInterface<IDXGISwapChain1>(swap) ? 29
+                                                        : 18;
+    std::vector<std::pair<unsigned, void *>> replacements{{8, (void *)&Present}};
+    if (count >= 29)
+        replacements.push_back({22, (void *)&Present1});
+    if (InstallTable(swap, count, replacements))
+    {
+        presentTracking = true;
+        ObserverInfo("observer swapchain Present methods installed");
+    }
+}
+void InstallSwapChain(IDXGISwapChain *swap)
+{
+    if (!swap || InspectorMode() != L"observe")
+        return;
+    InstallSwapChainObject(swap);
+    IDXGISwapChain1 *one = nullptr;
+    if (SUCCEEDED(swap->QueryInterface(__uuidof(IDXGISwapChain1), (void **)&one)))
+    {
+        if ((void *)one != (void *)swap)
+            InstallSwapChainObject(one);
+        one->Release();
+    }
+}
+HRESULT STDMETHODCALLTYPE CreateSwapChain(IDXGIFactory *f, IUnknown *device, DXGI_SWAP_CHAIN_DESC *desc,
+                                          IDXGISwapChain **out)
+{
+    HRESULT hr = Original<decltype(&CreateSwapChain)>(f, 10)(f, device, desc, out);
+    if (SUCCEEDED(hr) && out)
+        InstallSwapChain(*out);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE CreateSwapChainForHwnd(IDXGIFactory2 *f, IUnknown *device, HWND hwnd,
+                                                 const DXGI_SWAP_CHAIN_DESC1 *desc,
+                                                 const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen,
+                                                 IDXGIOutput *restrictTo, IDXGISwapChain1 **out)
+{
+    HRESULT hr = Original<decltype(&CreateSwapChainForHwnd)>(f, 15)(f, device, hwnd, desc, fullscreen, restrictTo, out);
+    if (SUCCEEDED(hr) && out)
+        InstallSwapChain(*out);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE CreateSwapChainForCoreWindow(IDXGIFactory2 *f, IUnknown *device, IUnknown *window,
+                                                       const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *restrictTo,
+                                                       IDXGISwapChain1 **out)
+{
+    HRESULT hr = Original<decltype(&CreateSwapChainForCoreWindow)>(f, 16)(f, device, window, desc, restrictTo, out);
+    if (SUCCEEDED(hr) && out)
+        InstallSwapChain(*out);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE CreateSwapChainForComposition(IDXGIFactory2 *f, IUnknown *device,
+                                                        const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *restrictTo,
+                                                        IDXGISwapChain1 **out)
+{
+    HRESULT hr = Original<decltype(&CreateSwapChainForComposition)>(f, 24)(f, device, desc, restrictTo, out);
+    if (SUCCEEDED(hr) && out)
+        InstallSwapChain(*out);
+    return hr;
+}
+void InstallFactoryObject(IDXGIFactory *factory)
+{
+    UINT count = SameInterface<IDXGIFactory7>(factory)   ? 32
+                 : SameInterface<IDXGIFactory6>(factory) ? 30
+                 : SameInterface<IDXGIFactory5>(factory) ? 29
+                 : SameInterface<IDXGIFactory4>(factory) ? 28
+                 : SameInterface<IDXGIFactory3>(factory) ? 26
+                 : SameInterface<IDXGIFactory2>(factory) ? 25
+                 : SameInterface<IDXGIFactory1>(factory) ? 14
+                                                         : 12;
+    std::vector<std::pair<unsigned, void *>> replacements{{10, (void *)&CreateSwapChain}};
+    if (count >= 25)
+    {
+        replacements.push_back({15, (void *)&CreateSwapChainForHwnd});
+        replacements.push_back({16, (void *)&CreateSwapChainForCoreWindow});
+        replacements.push_back({24, (void *)&CreateSwapChainForComposition});
+    }
+    if (InstallTable(factory, count, replacements))
+        ObserverInfo("observer DXGI factory methods installed");
+}
+void InstallFactory(IUnknown *object)
+{
+    if (!object || InspectorMode() != L"observe")
+        return;
+    IDXGIFactory *factory = nullptr;
+    if (FAILED(object->QueryInterface(__uuidof(IDXGIFactory), (void **)&factory)))
+        return;
+    InstallFactoryObject(factory);
+    IDXGIFactory2 *two = nullptr;
+    if (SUCCEEDED(factory->QueryInterface(__uuidof(IDXGIFactory2), (void **)&two)))
+    {
+        if ((void *)two != (void *)factory)
+            InstallFactoryObject(two);
+        two->Release();
+    }
+    factory->Release();
+}
 void InstallContext(ID3D11DeviceContext *c)
 {
     ID3D11DeviceContext4 *latest = nullptr;
@@ -991,6 +1304,14 @@ void InstallContext(ID3D11DeviceContext *c)
         ObserverInfo("observer Context4 methods installed");
 }
 } // namespace
+extern "C" void InstallSwapChainObserver(IDXGISwapChain *swap)
+{
+    InstallSwapChain(swap);
+}
+extern "C" void InstallFactoryObserver(IUnknown *factory)
+{
+    InstallFactory(factory);
+}
 extern "C" void InstallObservers(ID3D11Device *d, ID3D11DeviceContext *c)
 {
     auto mode = InspectorMode();
@@ -1017,6 +1338,23 @@ extern "C" void InstallObservers(ID3D11Device *d, ID3D11DeviceContext *c)
     }
     if (d)
     {
+        // Best effort for the directory proxy. Startup mode also observes all DXGI factory exports.
+        IDXGIDevice *dxgi = nullptr;
+        IDXGIAdapter *adapter = nullptr;
+        IDXGIFactory *factory = nullptr;
+        if (mode == L"observe" && SUCCEEDED(d->QueryInterface(__uuidof(IDXGIDevice), (void **)&dxgi)))
+        {
+            if (SUCCEEDED(dxgi->GetAdapter(&adapter)))
+            {
+                if (SUCCEEDED(adapter->GetParent(__uuidof(IDXGIFactory), (void **)&factory)))
+                {
+                    InstallFactory(factory);
+                    factory->Release();
+                }
+                adapter->Release();
+            }
+            dxgi->Release();
+        }
         ID3D11Device5 *latest = nullptr;
         if (SUCCEEDED(d->QueryInterface(__uuidof(ID3D11Device5), (void **)&latest)))
         {

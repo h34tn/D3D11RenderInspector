@@ -28,7 +28,11 @@
 
 记录的是实际调用前的状态，字段包括线程、上下文类型、调用参数、绑定 Shader（图形调用含 VS 及 GS/HS/DS）、资源地址、纹理尺寸/格式/采样数、缓冲大小与常量范围，图形调用另含 VS 资源、顶点/索引缓冲、DSV 与深度模板状态。
 
-可选读回只在请求带 `constants=1` / `textures=1` 时、对调试名称匹配 `filter=` 的调用执行：在原调用前于立即上下文 `CopySubresourceRegion` 到暂存资源并阻塞 `Map`，所以得到的是命令流中该位置的内容，代价是 GPU 同步卡顿。缓冲读回用一个 64 KiB 暂存缓冲，按内容哈希去重；纹理每个资源每次采样只拷 mip 0 一次。暂存资源在采样结束时释放，未采样时不分配。采样有事件数上限，不通过 Present 切帧。不同上下文的记录按写日志的互斥锁顺序排列，不等于跨线程 GPU 执行顺序。
+可选读回由 `constants=1` / `textures=1` / `buffers=1` 启用，对调试名称匹配 `filter=` 的调用执行：在原调用前于立即上下文拷贝到暂存资源并阻塞 `Map`，得到命令流中该位置的内容，代价是 GPU 同步卡顿。Buffer SRV 按视图 first/count 和 structured stride、raw DWORD 或 typed 格式换算字节范围。缓冲暂存资源默认 64 KiB，可用 `buffer_limit=` 提高到最大 4 MiB，按内容哈希去重；跨设备切换时重建暂存缓冲，唯一载荷每次采样最多 256 MiB。`constants=1` 还读取间接 Draw/Dispatch 的实际参数范围，解码 vertex/index count、instance count、start/base 等字段，正确保留负 base vertex。纹理每个资源每次采样只拷 mip 0 一次。暂存资源在采样结束时释放，未采样时不分配。
+
+版本 5 对已观察的 DXGI factory 创建方法和交换链 Present/Present1 建立私有虚表观察；启动模式还用既有 Detours 事务截获系统 `CreateDXGIFactory/1/2` 导出，以覆盖设备外部创建的 factory。目录代理通过设备的 DXGI adapter parent 做尽力接入，并观察 D3D11CreateDeviceAndSwapChain 的返回交换链。接口别名、既有交换链和不经这些入口的创建仍可能漏采。
+
+呈现入口递增进程内 `present_seq`，保留交换链身份，跳过 TEST 及同线程嵌套重复调用；不改变原方法参数或返回值。`frames=` 限制的是入口数，不承诺呈现成功或完整帧。首尾区间可不完整，多交换链必须另行关联，线程记录顺序也不是跨线程 GPU 执行顺序。`only_matching=1` 仅保存匹配 Shader 的调用，另受事件上限和帧请求 120 秒回调时间上限约束；无回调时不能保证及时完成。QPC 只表示 CPU 记录时间，不能衡量原游戏性能或 IK 的求解时间。
 
 ## 隔离与部署
 
@@ -53,7 +57,7 @@
 ## 后续扩展顺序
 
 1. 完善状态（光栅化等）与资源生命周期 ID；Draw / Dispatch 直接参数与深度模板状态已在采样格式版本 3 记录，VS 资源与可选缓冲/纹理读回在版本 4 加入。
-2. 接入 DXGI Present，区分调用流与完整帧。
-3. 扩展读回范围：其他 mip/数组层、结构化缓冲 SRV、UAV 内容，以及 RT 在调用后的结果。
+2. Present 入口已接入；继续完善交换链覆盖、帧选择和首尾完整性，不能把现有区间当作完整帧。
+3. 扩展读回范围：其他 mip/数组层、UAV 内容，以及 RT 在调用后的结果；Buffer SRV 范围读回已实现。
 4. 扩充 Shader/Context 版本入口与 Deferred CommandList 支持。
 5. 单独设计回放所需资源快照和命令序列；不要把当前 JSONL 当成可直接重放的格式。

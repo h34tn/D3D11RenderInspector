@@ -107,7 +107,7 @@ python tools/inspector.py run-startup --exe "D:\Games\YourTestGame\Game.exe" --o
 
 首次仍可用 `--mode forward`。`--wait` 供独立测试使用，最多等目标退出 90 秒；等待超时不会结束已启动的目标。初始化失败会清理本次尚未恢复入口的子进程。启动器退出码 0 表示钩子初始化成功，仍须检查游戏是否存活、`proxy.log` 中 Device5 / Context4 状态和完整采样，不能据此认定游戏兼容。
 
-采样输出与原代理使用相同格式，可在 GUI 中打开会话。`diagnose` 的安装文件检查针对同目录代理；启动接入方式应使用 `sessions` 和会话日志核实。启动接入不是 RenderDoc 后端，仍没有帧边界、GPU 时间或纹理像素。它保留真实 D3D11 COM 对象，但仍有虚表观察的兼容性边界；目标拒绝调试/模块加载时会失败，不改变目标的保护设置。
+采样输出与原代理使用相同格式，可在 GUI 中打开会话。`diagnose` 的安装文件检查针对同目录代理；启动接入方式应使用 `sessions` 和会话日志核实。版本 5 增加已观察交换链的 Present/Present1 入口标记，仍不是完整帧抓取、重放或 GPU 时间测量。它保留真实 D3D11 COM 对象，但仍有虚表观察的兼容性边界；目标拒绝调试/模块加载时会失败，不改变目标的保护设置。
 
 ## 触发一次短采样
 
@@ -126,11 +126,26 @@ python tools/inspector.py capture "<会话目录>" --events 3000 --constants --t
 python tools/inspector.py constants "<会话目录>\capture_3.jsonl" --event 120 --stage ps --slot 0
 ```
 
-- `--constants`：读回 VS 与 PS/CS 常量缓冲（按 D3D11.1 实际绑定的 first/num 常量范围）、顶点缓冲（含实例缓冲）和索引缓冲，单个缓冲最多 64 KiB（超出标 `data_truncated`）。
+- `--constants`：读回 VS 与 PS/CS 常量缓冲（按 D3D11.1 实际绑定的 first/num 常量范围）、顶点缓冲（含实例缓冲）、索引缓冲及间接调用参数。单个缓冲默认最多 64 KiB（超出标 `data_truncated`），可用 `--buffer-limit` 调整。
 - `--textures`：把 VS 与 PS/CS 输入的 2D 纹理 mip 0、第 0 层存成 DDS（DX10 头，typeless 资源写入视图格式）；同一资源每次采样只存一次，即其**首次被引用时**的内容。单文件上限 64 MiB，每次采样最多 1024 张 / 1 GiB；多重采样、不支持的格式和超限都会写明 `dump_skipped` 原因。
 - `--filter`：PS/CS 或 VS 调试名称包含任一子串的调用才读回（可重复，仅 ASCII）；不给则全部调用都读回。
 - 读回是在调用前于立即上下文插入拷贝并阻塞 Map，内容对应命令流中的该位置；**会让目标明显卡顿**，事件多、不加过滤时尤甚。产物在 `capture_N_data/`：`buf_<哈希>.bin` 按内容去重，`tex_<资源地址>.dds`；`analyze` 为 8 位 RGBA/BGRA/R8 纹理生成同名 PNG 预览，块压缩与浮点格式只留 DDS。
 - `constants` 命令把读回的常量缓冲按 float4 行打印（同时给出整数解释），行号即反汇编中的 `cbN[行]`。
+
+### 骨骼缓冲与跨呈现区间采样（版本 5）
+
+```powershell
+python tools/inspector.py capture "<会话目录>" --events 10000 --frames 30 --only-matching --filter "Avatar" --constants --buffers
+```
+
+- `--buffers`：每个匹配调用读回 VS/PS/CS 的 StructuredBuffer、Raw Buffer 和支持格式的 Typed Buffer SRV。记录 `first_element`、`num_elements`、`element_bytes`，按视图范围换算实际字节偏移。缓冲资源另记 stride、bind/misc flags 和可用的调试名称。每次采样的唯一缓冲载荷合计上限 256 MiB。
+- `--buffer-limit 65536..4194304`：每次缓冲读回的字节上限，默认 64 KiB，最大 4 MiB，适用于常量/顶点/索引及 Buffer SRV。超限明确标记 `data_truncated`。为大池化网格使用较大上限时应缩短采样区间。
+- 匹配调用启用 `--constants` 时，间接 Draw/Dispatch 增加 `indirect_arguments`：在实际调用前读回其参数范围，并在 `resolved` 中解码调用参数，保留有符号 `base_vertex`。未启用读回时仍只记录缓冲身份与偏移。
+- `--frames 1..600`：在指定数量的非 TEST Present/Present1 **入口**后结束；`--events` 仍是先到即止的事件上限。呈现入口不保证成功显示，首尾区间可能不完整，多交换链须依据 `swap_chain` 分别核对。嵌套 Present 调用只计一次，`DXGI_PRESENT_TEST` 不计数。
+- `--only-matching`：只有 PS/CS 或 VS 调试名称匹配过滤条件的调用才占事件额度，必须同时指定 `--filter` 和 `--frames`。按 Present 限制的采样另有 120 秒回调时间上限；无绘制/呈现回调时请求和日志可能仍待完成。检查结束记录的 `reason`，`event_limit` 或 `timeout` 不代表采到了请求数量的呈现区间。
+- JSONL 头部版本为 5；调用增加 `present_seq`、`present_tracking` 与 `qpc`，呈现入口单独记为 `type=present`，头部提供 `qpc_frequency`。QPC 是受读回卡顿影响的 CPU 记录时间，不能当成 GPU 时间或未受干扰的动画时钟。
+- 目录代理观察直接返回的交换链，并尝试从设备的 DXGI factory 接入后续创建；启动模式另截获系统 DXGI factory 创建入口。已有/未观察到的交换链、Factory/SwapChain 接口别名和其他 D3D API 仍有覆盖边界，须检查当前会话中的 Present 标记。
+- 骨骼矩阵是需要结合 Shader 反汇编识别的载荷。工具不会把任意 float4 缓冲自动称作骨骼，也不能从最终蒙皮变换直接确定 CPU IK 求解器、输入目标或权重。
 
 输出：
 
@@ -138,7 +153,7 @@ python tools/inspector.py constants "<会话目录>\capture_3.jsonl" --event 120
 |---|---|
 | `proxy.log` | 转发与观察器安装状态 |
 | `vs_*`、`ps_*`、`gs_*`、`hs_*`、`ds_*`、`cs_*.dxbc` | 观察器安装后经对应创建入口创建的 Shader 原始字节码 |
-| `capture_N.jsonl` | 按调用顺序记录的立即上下文状态（版本 3 起含 `args` 调用参数，图形调用另含 `depth_target` / `depth_state`；版本 4 起图形调用另含 VS 及 `vs_inputs`、`vs_constant_buffers`、`vertex_buffers`、`index_buffer`，读回开启时匹配调用带 `readback: 1`） |
+| `capture_N.jsonl` | 按调用顺序记录的立即上下文状态；版本 5 另含 `present_seq`、CPU `qpc` 和独立 Present 入口标记，结束记录包含 `reason` / `presents`。版本 3/4 的参数、深度和 VS 绑定字段继续保留。 |
 | `capture_N_data/` | 可选读回产物：缓冲内容 `buf_*.bin`、纹理 `tex_*.dds` 及 PNG 预览 |
 | `capture.request` | 待消费请求，开始采样后删除 |
 
@@ -182,8 +197,8 @@ python tools/inspector.py uninstall "D:\Games\YourTestGame"
 ## 支持边界
 
 - 当前覆盖 Windows x64 / D3D11，观察器要求 Device5 / Context4 与原接口指针一致；其他接口布局会跳过观察。D3D9、D3D12、Vulkan、OpenGL、x86、移动端不在本版本范围内。
-- 记录 Draw 系列、Dispatch 系列调用时的 VS/PS/CS（以及绑定的 GS/HS/DS）、VS 与 PS/CS 的 SRV 和常量缓冲区（身份、大小、D3D11.1 常量范围）、顶点/索引缓冲、RTV / CS UAV、部分混合状态、调用参数（顶点/索引/实例数、线程组数），以及图形调用的 DSV 与深度模板状态（`default=1` 表示未绑定状态对象、按 D3D11 默认值记录）。间接调用只记录参数缓冲身份与偏移，不读回内容。常量/顶点缓冲内容与纹理 mip 0 只在请求读回时采集（见上文）；其他 mip/数组层、非 2D 纹理内容、结构化缓冲 SRV 内容、光栅化等其余管线状态尚未采集；CS UAV 只覆盖前 8 槽。
-- 没有 Present / 帧边界、GPU 时间戳、回放器；不是 `.rdc`。
+- 记录 Draw 系列、Dispatch 系列调用时的 VS/PS/CS（以及绑定的 GS/HS/DS）、VS 与 PS/CS 的 SRV 和常量缓冲区、顶点/索引缓冲、RTV / CS UAV、部分混合状态、调用参数，以及图形调用的 DSV 与深度模板状态。间接参数可选读回，其他 mip/数组层、非 2D 纹理、UAV 内容、光栅化等其余管线状态尚未采集；CS UAV 只覆盖前 8 槽。
+- 已观察的 Present 入口可划分调用区间；没有完整帧保证、GPU 时间戳或回放器，不是 `.rdc`。
 - Deferred Context 不采绑定快照；`ExecuteCommandList` 只留提交标记，不展开内部命令。不能据此证明命令列表内部的实际执行顺序。
 - 资源 ID 是进程地址，可能复用；没有生命周期跟踪。PS/CS 字节码只覆盖安装观察器后经所钩入口创建的对象，不覆盖所有新版本创建入口或更早创建的 Shader。
 - 采样时会同步查询状态、序列化并写盘，可能明显影响帧率。关闭采样后也仍有转发/Shader 记录开销，不用于正式性能基准。

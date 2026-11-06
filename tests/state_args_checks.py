@@ -10,7 +10,7 @@ def validate_state_args(session):
     assert len(captures) == 1, captures
     capture = captures[0]
     header = json.loads(capture.read_text(encoding='utf8').splitlines()[0])
-    assert header['version'] == 4, header
+    assert header['version'] == 5, header
     events, complete, errors = read_capture(capture)
     assert complete and not errors and len(events) == 14, (complete, errors, len(events))
     direct = [
@@ -31,6 +31,13 @@ def validate_state_args(session):
         assert buffer['dimension'] == 1 and buffer['bytes'] == size and buffer['id'], buffer
     assert events[3]['args']['buffer']['id'] == events[4]['args']['buffer']['id']
     assert events[3]['args']['buffer']['id'] != events[13]['args']['buffer']['id']
+    assert events[3]['indirect_arguments']['resolved'] == direct[1][1]
+    assert events[4]['indirect_arguments']['resolved'] == direct[2][1]
+    assert events[13]['indirect_arguments']['resolved'] == {'x': 4, 'y': 2, 'z': 1}
+    for i, size in [(3,16),(4,20),(13,12)]:
+        data=events[i]['indirect_arguments']
+        assert data['data_bytes']==size and data['data_offset']==events[i]['args']['offset'],data
+        assert (session/data['data']).stat().st_size==size
     no_depth = {0, 1, 2, 3, 4, 10}
     depth_id = None
     for index, event in enumerate(events[:13]):
@@ -75,4 +82,5 @@ def validate_state_args(session):
     assert 'base_vertex=-2' in table[0]['args']
     assert '只读标志 3' in table[9]['depth'] and 'ref=90' in table[9]['depth']
     assert '默认状态' in table[5]['depth']
-    assert '内容未读回' in table[13]['args'] and table[13]['depth'] == ''
+    assert 'x=4, y=2, z=1' in table[13]['args'] and table[13]['depth'] == ''
+    assert 'base_vertex=-2' in table[4]['args']

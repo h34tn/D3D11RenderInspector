@@ -29,4 +29,6 @@ if errorlevel 1 exit /b 1
 cl /nologo /std:c++17 /utf-8 /W4 /O2 /MT /EHsc /Isrc tests\state_args_smoke.cpp src\config.cpp /Fo"build\\" /Fe:build\state_args_smoke.exe
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++17 /utf-8 /W4 /O2 /MT /EHsc /Isrc tests\readback_smoke.cpp src\config.cpp dxguid.lib /Fo"build\\" /Fe:build\readback_smoke.exe
+if errorlevel 1 exit /b 1
+cl /nologo /std:c++17 /utf-8 /W4 /O2 /MT /EHsc /Isrc tests\sequence_smoke.cpp src\config.cpp dxguid.lib user32.lib /Fo"build\\" /Fe:build\sequence_smoke.exe
 exit /b %errorlevel%
